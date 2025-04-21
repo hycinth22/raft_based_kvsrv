@@ -2,6 +2,8 @@ package lock
 
 import (
 	"6.5840/kvtest1"
+	"6.5840/kvsrv1/rpc"
+	"time"
 )
 
 type Lock struct {
@@ -11,6 +13,8 @@ type Lock struct {
 	// MakeLock().
 	ck kvtest.IKVClerk
 	// You may add code here
+	lockKey string
+	clientID string
 }
 
 // The tester calls MakeLock() and passes in a k/v clerk; you code can
@@ -18,13 +22,68 @@ type Lock struct {
 func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 	lk := &Lock{ck: ck}
 	// You may add code here
+	lk.lockKey = l
+	lk.clientID = kvtest.RandValue(8)
 	return lk
 }
 
 func (lk *Lock) Acquire() {
 	// Your code here
+	holding_client, lockVer, err := lk.ck.Get(lk.lockKey)
+	if err == rpc.ErrNoKey {
+		// try to create key and obtain the lock
+		puterr := lk.ck.Put(lk.lockKey, lk.clientID, 0)
+		if puterr == rpc.OK {
+			return // okay
+		}
+		if puterr != rpc.ErrVersion {
+			panic(puterr)
+		}
+		// other client have created, the lock maybe holding or already released
+		// so we reget
+		holding_client, lockVer, err = lk.ck.Get(lk.lockKey)
+		if err != rpc.OK {
+			panic(puterr)
+		}
+	}
+	for {
+		for holding_client != "" {
+			time.Sleep(100 * time.Millisecond)
+			// waiting for releasing
+			holding_client, lockVer, err = lk.ck.Get(lk.lockKey)
+			if err != rpc.OK {
+				panic(err)
+			}
+		}
+		// released, try to obtain the lock
+		puterrerr := lk.ck.Put(lk.lockKey, lk.clientID, lockVer)
+		if puterrerr == rpc.OK {
+			return // okay
+		} else if puterrerr == rpc.ErrVersion {
+			holding_client, lockVer, err = lk.ck.Get(lk.lockKey) // reget, retry in next round
+		} else {
+			panic(puterrerr)
+		}
+	}
 }
 
+// if Acquire() never called, calling to Release() will panics
+// if the client is not holding the lock, this opertion will be no-op
 func (lk *Lock) Release() {
 	// Your code here
+	holding_client, lockVer, err := lk.ck.Get(lk.lockKey)
+	if err != rpc.OK {
+		panic(err)
+	}
+	// check holding client
+	if holding_client != lk.clientID {
+		return
+	}
+	// release the lock
+	err = lk.ck.Put(lk.lockKey, "", lockVer)
+	if err != rpc.OK {
+		// ErrNoKey is impossible, because we have observed a version
+		// ErrVersion is impossible, because we have observed holding_client == lk.clientID then only this client will override it
+		panic(err)
+	}
 }
