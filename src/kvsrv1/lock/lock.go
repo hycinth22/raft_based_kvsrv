@@ -27,6 +27,7 @@ func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 	return lk
 }
 
+
 func (lk *Lock) Acquire() {
 	// Your code here
 	holding_client, lockVer, err := lk.ck.Get(lk.lockKey)
@@ -36,10 +37,14 @@ func (lk *Lock) Acquire() {
 		if puterr == rpc.OK {
 			return // okay
 		}
-		if puterr != rpc.ErrVersion {
+		if puterr == rpc.ErrMaybe {
+			// we dont know succ or fail...
+			// it doesn't matter, we reget to see who holding
+		} else if puterr != rpc.ErrVersion {
 			panic(puterr)
 		}
 		// other client have created, the lock maybe holding or already released
+		// or we created and obtained but got ErrMaybe
 		// so we reget
 		holding_client, lockVer, err = lk.ck.Get(lk.lockKey)
 		if err != rpc.OK {
@@ -47,6 +52,11 @@ func (lk *Lock) Acquire() {
 		}
 	}
 	for {
+		// check holding client
+		if holding_client == lk.clientID {
+			// maybe duplicated acquire or previous ErrMaybe put
+			return
+		}
 		for holding_client != "" {
 			time.Sleep(100 * time.Millisecond)
 			// waiting for releasing
@@ -59,8 +69,11 @@ func (lk *Lock) Acquire() {
 		puterrerr := lk.ck.Put(lk.lockKey, lk.clientID, lockVer)
 		if puterrerr == rpc.OK {
 			return // okay
+		} else if puterrerr == rpc.ErrMaybe {
+			// we dont know succ or fail...
+			holding_client, lockVer, err = lk.ck.Get(lk.lockKey) // reget to see holding_client
 		} else if puterrerr == rpc.ErrVersion {
-			holding_client, lockVer, err = lk.ck.Get(lk.lockKey) // reget, retry in next round
+			holding_client, lockVer, err = lk.ck.Get(lk.lockKey) // contending, retry in next round
 		} else {
 			panic(puterrerr)
 		}
@@ -81,6 +94,10 @@ func (lk *Lock) Release() {
 	}
 	// release the lock
 	err = lk.ck.Put(lk.lockKey, "", lockVer)
+	if err == rpc.ErrMaybe {
+		// the put must have been performed, because we have observed holding_client == lk.clientID then only this client will override it
+		return
+	}
 	if err != rpc.OK {
 		// ErrNoKey is impossible, because we have observed a version
 		// ErrVersion is impossible, because we have observed holding_client == lk.clientID then only this client will override it

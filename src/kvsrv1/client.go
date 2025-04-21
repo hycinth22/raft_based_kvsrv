@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+const RPC_RESEND_DURATION = 100 * time.Millisecond
 
 type Clerk struct {
 	clnt   *tester.Clnt
@@ -37,8 +38,10 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	}
 	reply := rpc.GetReply{}
 	ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
-	if !ok {
-		panic("KVSrcClient: rpc call Get failed")
+	for !ok {
+		time.Sleep(RPC_RESEND_DURATION)
+		// request or response is lost, it's safe to simply resend get
+		ok = ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
 	}
 	return reply.Value, reply.Version, reply.Err
 }
@@ -69,8 +72,17 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 	}
 	reply := rpc.PutReply{}
 	ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
-	if !ok {
-		panic("KVSrcClient: rpc call Put failed")
+	for !ok {
+		time.Sleep(RPC_RESEND_DURATION)
+		// request or response is lost, it's safe to resend put with version
+		ok = ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
+		// however, there is a tricky case
+		// if 1st request arrives in server, executes successfully, and response is lost
+		// then we resend put and we will got ErrVersion (actually it's successfully!)
+		// we cannot distinguish between this case and real ErrVersion (version changed by other client)
+		if reply.Err == rpc.ErrVersion {
+			reply.Err = rpc.ErrMaybe 
+		}
 	}
 	return reply.Err
 }
