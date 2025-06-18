@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const RETRY_DURATION = 100 * time.Millisecond
+
 type Lock struct {
 	// IKVClerk is a go interface for k/v clerks: the interfaces hides
 	// the specific Clerk type of ck but promises that ck supports
@@ -39,7 +41,7 @@ func (lk *Lock) Acquire() {
 		}
 		if puterr == rpc.ErrMaybe {
 			// we dont know succ or fail...
-			// it doesn't matter, we reget to see who holding
+			// it doesn't matter, we reget to see who is holding
 		} else if puterr != rpc.ErrVersion {
 			panic(puterr)
 		}
@@ -58,7 +60,7 @@ func (lk *Lock) Acquire() {
 			return
 		}
 		for holding_client != "" {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(RETRY_DURATION)
 			// waiting for releasing
 			holding_client, lockVer, err = lk.ck.Get(lk.lockKey)
 			if err != rpc.OK {
@@ -66,16 +68,16 @@ func (lk *Lock) Acquire() {
 			}
 		}
 		// released, try to obtain the lock
-		puterrerr := lk.ck.Put(lk.lockKey, lk.clientID, lockVer)
-		if puterrerr == rpc.OK {
+		puterr := lk.ck.Put(lk.lockKey, lk.clientID, lockVer)
+		if puterr == rpc.OK {
 			return // okay
-		} else if puterrerr == rpc.ErrMaybe {
+		} else if puterr == rpc.ErrMaybe {
 			// we dont know succ or fail...
 			holding_client, lockVer, err = lk.ck.Get(lk.lockKey) // reget to see holding_client
-		} else if puterrerr == rpc.ErrVersion {
+		} else if puterr == rpc.ErrVersion {
 			holding_client, lockVer, err = lk.ck.Get(lk.lockKey) // contending, retry in next round
 		} else {
-			panic(puterrerr)
+			panic(puterr)
 		}
 	}
 }
