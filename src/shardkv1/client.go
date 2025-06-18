@@ -3,7 +3,7 @@ package shardkv
 //
 // client code to talk to a sharded key/value service.
 //
-// the client uses the shardctrler's clerk to query for the current
+// the client uses the shardctrler to query for the current
 // configuration and find the assignment of shards (keys) to groups,
 // and then talks to the group that holds the key's shard.
 //
@@ -18,16 +18,16 @@ import (
 
 type Clerk struct {
 	clnt *tester.Clnt
-	qck  *shardctrler.QueryClerk
+	sck  *shardctrler.ShardCtrler
 	// You will have to modify this struct.
 }
 
-// The tester calls MakeClerk and passes in a clerk for the
-// shardctrler with only the Query method.
-func MakeClerk(clnt *tester.Clnt, qck *shardctrler.QueryClerk) kvtest.IKVClerk {
+// The tester calls MakeClerk and passes in a shardctrler so that
+// client can call it's Query method
+func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk {
 	ck := &Clerk{
 		clnt: clnt,
-		qck:  qck,
+		sck:  sck,
 	}
 	// You'll have to add code here.
 	return ck
@@ -35,7 +35,7 @@ func MakeClerk(clnt *tester.Clnt, qck *shardctrler.QueryClerk) kvtest.IKVClerk {
 
 
 // Get a key from a shardgrp.  You can use shardcfg.Key2Shard(key) to
-// find the shard responsible for the key and ck.qck.Query() to read
+// find the shard responsible for the key and ck.sck.Query() to read
 // the current configuration and lookup the servers in the group
 // responsible for key.  You can make a clerk for that group by
 // calling shardgrp.MakeClerk(ck.clnt, servers).

@@ -79,6 +79,11 @@ func (cfg *Config) Cleanup() {
 	cfg.Clnts.cleanup()
 	cfg.Groups.cleanup()
 	cfg.net.Cleanup()
+	if cfg.t.Failed() {
+		annotation.cleanup(true, "test failed")
+	} else {
+		annotation.cleanup(false, "test passed")
+	}
 	cfg.CheckTimeout()
 }
 
@@ -133,7 +138,7 @@ func (cfg *Config) End() {
 		ops := atomic.LoadInt32(&cfg.ops)  //  number of clerk get/put/append calls
 
 		fmt.Printf("  ... Passed --")
-		fmt.Printf("  %4.1f  %d %5d %4d\n", t, npeers, nrpc, ops)
+		fmt.Printf("  time %4.1fs #peers %d #RPCs %5d #Ops %4d\n", t, npeers, nrpc, ops)
 	}
 }
 

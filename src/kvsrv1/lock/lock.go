@@ -9,7 +9,7 @@ import (
 const RETRY_DURATION = 100 * time.Millisecond
 
 type Lock struct {
-	// IKVClerk is a go interface for k/v clerks: the interfaces hides
+	// IKVClerk is a go interface for k/v clerks: the interface hides
 	// the specific Clerk type of ck but promises that ck supports
 	// Put and Get.  The tester passes the clerk in when calling
 	// MakeLock().
@@ -19,8 +19,11 @@ type Lock struct {
 	clientID string
 }
 
-// The tester calls MakeLock() and passes in a k/v clerk; you code can
+// The tester calls MakeLock() and passes in a k/v clerk; your code can
 // perform a Put or Get by calling lk.ck.Put() or lk.ck.Get().
+//
+// Use l as the key to store the "lock state" (you would have to decide
+// precisely what the lock state is).
 func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 	lk := &Lock{ck: ck}
 	// You may add code here
