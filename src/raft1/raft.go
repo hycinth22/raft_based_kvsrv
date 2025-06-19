@@ -216,9 +216,11 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	reply.Term = rf.currentTerm
 
 	// check stale request
 	if args.Term < rf.currentTerm {
+		reply.Success = false
 		return
 	}
 
@@ -229,6 +231,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.lastSync = time.Now()
 	randRange := int64(electionTimeoutMax - electionTimeoutMin)
 	rf.electionTimeout = electionTimeoutMin + time.Duration(rand.Int63()%randRange)
+	reply.Success = true
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
