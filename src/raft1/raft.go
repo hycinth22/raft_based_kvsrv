@@ -19,6 +19,20 @@ import (
 	"6.5840/tester1"
 )
 
+type Role int
+const (
+	ROLE_FOLLOWER Role = 0
+	ROLE_CANDIDATE Role = 1
+	ROLE_LEADER Role = 2
+)
+
+const (
+	electionTimeoutMin time.Duration = 250 * time.Millisecond
+	electionTimeoutMax time.Duration = 400 * time.Millisecond
+
+	replicateInterval time.Duration = 50 * time.Millisecond
+)
+
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -31,16 +45,24 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	role        Role
+	currentTerm int
+	votedFor    int // -1 means vote for none
 
+	lastSync   time.Time
+	electionTimeout time.Duration // random
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here (3A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	isleader= rf.role == ROLE_LEADER
 	return term, isleader
 }
 
@@ -101,21 +123,52 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
 
 
-// example RequestVote RPC arguments structure.
+func (rf *Raft) intoFollower(term int) {
+	rf.role = ROLE_FOLLOWER
+	rf.votedFor = -1
+	rf.currentTerm = term
+}
+
+// RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (3A, 3B).
+	Term        int
+	CandidateId int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	Term        int
+	VoteGranted bool // true means candidate received vote
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// check stale request
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+		return
+	}
+
+	// new term
+	if args.Term > rf.currentTerm {
+		rf.intoFollower(args.Term)
+	}
+
+	// contending or duplicated vote request
+	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+		reply.VoteGranted = false
+		return
+	}
+
+	reply.VoteGranted = true
+	rf.votedFor = args.CandidateId
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -147,6 +200,39 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderId int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// check stale request
+	if args.Term < rf.currentTerm {
+		return
+	}
+
+	if args.Term >= rf.currentTerm {
+		rf.intoFollower(args.Term)
+	}
+
+	rf.lastSync = time.Now()
+	randRange := int64(electionTimeoutMax - electionTimeoutMin)
+	rf.electionTimeout = electionTimeoutMin + time.Duration(rand.Int63()%randRange)
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -198,7 +284,65 @@ func (rf *Raft) ticker() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
+		rf.mu.Lock()
+		if rf.role != ROLE_LEADER && time.Since(rf.lastSync) > rf.electionTimeout {
+			rf.currentTerm++
+			rf.role = ROLE_CANDIDATE
+			rf.votedFor = rf.me
+			term := rf.currentTerm
 
+			voted := 1 // vote from self
+			askVoteFromPeer := func(peerIndex int, args *RequestVoteArgs) {
+				reply := &RequestVoteReply{}
+				ok := rf.sendRequestVote(peerIndex, args, reply)
+
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if !ok {
+					return
+				}
+
+				// discover new term
+				if reply.Term > rf.currentTerm {
+					rf.intoFollower(reply.Term)
+					return
+				}
+
+				// check the context
+				if rf.role != ROLE_CANDIDATE || rf.currentTerm != term {
+					return
+				}
+
+				// count the votes
+				if reply.VoteGranted {
+					voted++
+				}
+
+				if voted >= (len(rf.peers)+1)/2 && rf.role == ROLE_CANDIDATE {
+					rf.role = ROLE_LEADER
+					go rf.replicationTicker(term)
+				}
+			}
+
+			if rf.role != ROLE_CANDIDATE || rf.currentTerm != term {
+				return
+			}
+
+			for i := range rf.peers {
+				if i == rf.me {
+					continue
+				}
+
+				args := &RequestVoteArgs{
+					Term:        rf.currentTerm,
+					CandidateId: rf.me,
+				}
+
+				go askVoteFromPeer(i, args)
+			}
+
+		}
+		rf.mu.Unlock()
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -224,6 +368,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
+	rf.role = ROLE_FOLLOWER
+	rf.currentTerm = 0
+	rf.votedFor = -1
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -233,4 +380,53 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 
 	return rf
+}
+
+// could only replicate in the given term
+func (rf *Raft) replicationTicker(term int) {
+	for rf.killed() == false {
+
+		ok := rf.startReplication(term)
+		if !ok {
+				break
+		}
+
+		time.Sleep(replicateInterval)
+	}
+}
+
+func (rf *Raft) startReplication(term int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.role != ROLE_LEADER || rf.currentTerm != term {
+		return false
+	}
+
+	for peerIdx := range rf.peers {
+		if peerIdx == rf.me {
+			continue
+		}
+
+		args := &AppendEntriesArgs{
+				Term:     rf.currentTerm,
+				LeaderId: rf.me,
+		}
+
+		go func(peer int, args *AppendEntriesArgs) {
+			reply := &AppendEntriesReply{}
+			ok := rf.sendAppendEntries(peer, args, reply)
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if !ok {
+				return
+			}
+			// discover newer term
+			if reply.Term > rf.currentTerm {
+				rf.intoFollower(reply.Term)
+				return
+			}
+		}(peerIdx, args)
+	}
+	return true
 }
