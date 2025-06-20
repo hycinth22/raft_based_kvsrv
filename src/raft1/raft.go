@@ -32,6 +32,8 @@ const (
 
 	replicateInterval time.Duration = 50 * time.Millisecond
 	initialLogQueueCapacity int = 1024
+
+	OPT_BACK_UP_INCONSITENT_IN_TERM bool = true
 )
 
 // an entry of log
@@ -273,6 +275,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	XTerm   int // term in the conflicting entry (if any)
+	XIndex  int // index of first entry with that term (if any)
+	XLen    int // log length
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -297,8 +303,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTimeout = electionTimeoutMin + time.Duration(rand.Int63()%randRange)
 
 	// Consistency check: Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
-	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.Success = false // leader will retry with smaller log index
+	// leader will retry with smaller log index
+	if args.PrevLogIndex >= len(rf.log) { // preceding entries not exist yet
+		reply.Success = false
+		if OPT_BACK_UP_INCONSITENT_IN_TERM {
+			reply.XTerm = -1
+			reply.XIndex = -1
+			reply.XLen = len(rf.log) // tell leader to sync from here
+		}
+		return
+	}
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // preceding entry whose term is conflicting
+		reply.Success = false
+		if OPT_BACK_UP_INCONSITENT_IN_TERM {
+			// find index of the first entry in the conflicting term
+			xterm := rf.log[args.PrevLogIndex].Term
+			xindex := args.PrevLogIndex
+			xlen := len(rf.log)
+			for xindex > 0 {
+				if rf.log[xindex-1].Term != xterm {
+					break
+				}
+				xindex--
+			}
+			reply.XTerm = xterm // conflicting term
+			reply.XIndex = xindex // index of first entry with that term 
+			reply.XLen = xlen // useless now...
+		}
 		return
 	}
 	reply.Success = true
@@ -591,12 +622,43 @@ func (rf *Raft) startReplication(term int) bool {
 				DPrintf("[term%v node%v Leader Replication] peer %v AppendEntries Success num_entries:%v nextIndex:%v Entries:%#v", term, rf.me, peer, len(args.Entries), endIndex, args.Entries)
 			} else {
 				if rf.nextIndex[peerIdx] == 1 {
-					// impossible. faulty peer because log 0 must be consistent
-					DPrintf("[term%v node%v Leader Replication] faulty peer %v.", term, rf.me, peer)
+					// impossible. faulty peer since log 0(empty sentinel) must be consistent
+					DPrintf("[term%v node%v Leader Replication] faulty peer %v inconsistent with sentinel log entry.", term, rf.me, peer)
 					return // give up to replicate to this peer
 				}
-				DPrintf("[term%v node%v Leader Replication] peer %v nextIndex--", term, rf.me, peer)
-				rf.nextIndex[peerIdx]--
+
+				if OPT_BACK_UP_INCONSITENT_IN_TERM {
+					if reply.XTerm == -1 {
+						// follower's log is too short, reset nextIndex to length of the follower's log
+						rf.nextIndex[peerIdx] = reply.XLen
+					} else {
+						// follower's log has conflicting entries.
+						if reply.XIndex >= len(rf.log) {
+							// impossible. faulty peer since reply.XIndex <= args.PrevLogIndex < len(rf.log)
+							DPrintf("[term%v node%v Leader Replication] faulty peer %v reply XIndex >= len(rf.log).", term, rf.me, peer)
+							return // give up to replicate to this peer
+						}
+						// the conflicting term maybe partially valid (commited)
+						//
+						// if entry exists in leader's log, it must be commited already
+						// so, if any entry whose term is XTerm , the XIndex is valid and 
+						// otherwise, the entrire term is invalid and need to be overrite
+						if rf.log[reply.XIndex].Term == reply.XTerm {
+							// XIndex is index of first entry with that term, and maybe more entries are commited alreay in leader's log
+							nextIndex := reply.XIndex + 1
+							for nextIndex < len(rf.log) && rf.log[nextIndex].Term == reply.XTerm {
+								nextIndex++
+							}
+							rf.nextIndex[peerIdx] = nextIndex
+						} else {
+							// XIndex is index of first entry with that term, so there is no one entry whose term is XTerm in leader's log
+							rf.nextIndex[peerIdx] = reply.XIndex
+						}
+					}
+				} else {
+					rf.nextIndex[peerIdx]--
+				}
+				DPrintf("[term%v node%v Leader Replication] peer %v nextIndex updated %v", term, rf.me, peer, rf.nextIndex)
 			}
 		}(peerIdx, args)
 	}
