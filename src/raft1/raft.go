@@ -530,7 +530,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.majarity = (len(rf.peers)+1)/2
+	rf.majarity = len(rf.peers)/2+1
 	rf.applyCh = applyCh
 	// Your initialization code here (3C).
 	rf.role = ROLE_FOLLOWER
