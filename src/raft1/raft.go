@@ -64,13 +64,13 @@ type Raft struct {
 	electionTimeout time.Duration // random delay
 
 	/// log data and its commit info
-	log         []Entry // log. persisted
-	commitIndex int
+	log         []Entry // log. persisted. note: index != Entry.Index
+	commitIndex int     // note: it's not a array index
 	lastApplied int
 
 	/// state on leaders (Reinitialized after election)
-	nextIndex  []int // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-	matchIndex []int // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
+	nextIndex  []int // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1). note: it's not a array index
+	matchIndex []int // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically) note: it's not a array index
 }
 
 // return currentTerm and whether this server
@@ -226,14 +226,36 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) getLastLogIndex() int {
-	return len(rf.log)-1
+	return rf.log[len(rf.log)-1].Index
 }
 
 func (rf *Raft) getLastLogIndexAndTerm() (index int, term int) {
-	index = len(rf.log)-1
-	term = rf.log[index].Term
+	index = rf.log[len(rf.log)-1].Index
+	term = rf.log[len(rf.log)-1].Term
 	return
 }
+
+func (rf *Raft) lookupEntryByIndex(index int) *Entry {
+	return &rf.log[rf.lookupEntryPosByIndex(index)]
+}
+
+// inclusive range [beginIndex, endIndex]
+func (rf *Raft) lookupEntriesByIndex(beginIndex int, endIndex int) []Entry {
+	beginPos := rf.lookupEntryPosByIndex(beginIndex)
+	endPos := rf.lookupEntryPosByIndex(endIndex)
+	return rf.log[beginPos : endPos+1]
+}
+
+func (rf *Raft) lookupEntryPosByIndex(index int) int {
+	// DPrintf("lookupEntryPosByIndex %v", index)
+	return index - rf.log[0].Index
+}
+
+func (rf *Raft) discardEntriesFrom(fromIndex int) {
+	pos := rf.lookupEntryPosByIndex(fromIndex)
+	rf.log = rf.log[:pos]
+}
+
 
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
@@ -285,9 +307,9 @@ type AppendEntriesReply struct {
 	Term    int
 	Success bool
 
-	XTerm   int // term in the conflicting entry (if any)
-	XIndex  int // index of first entry with that term (if any)
-	XLen    int // log length
+	XTerm         int // term in the conflicting entry (if any)
+	XIndex        int // index of first entry with that term (if any)
+	XNextIndex    int // next append index. used only if follower has shorter than args.PrevLogIndex
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -312,14 +334,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	randRange := int64(electionTimeoutMax - electionTimeoutMin)
 	rf.electionTimeout = electionTimeoutMin + time.Duration(rand.Int63()%randRange)
 
+	lastLogIndex := rf.getLastLogIndex()
+
 	// Consistency check: Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	// leader will retry with smaller log index
-	if args.PrevLogIndex >= len(rf.log) { // preceding entries not exist yet
+	if args.PrevLogIndex > lastLogIndex { // preceding entries not exist yet
 		reply.Success = false
 		if OPT_BACK_UP_INCONSITENT_IN_TERM {
 			reply.XTerm = -1
 			reply.XIndex = -1
-			reply.XLen = len(rf.log) // tell leader to sync from here
+			reply.XNextIndex = lastLogIndex+1 // tell leader to sync from here
 		}
 		return
 	}
@@ -327,45 +351,44 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		if OPT_BACK_UP_INCONSITENT_IN_TERM {
 			// find index of the first entry in the conflicting term
-			xterm := rf.log[args.PrevLogIndex].Term
-			xindex := args.PrevLogIndex
-			xlen := len(rf.log)
+			prevEntry := rf.lookupEntryByIndex(args.PrevLogIndex)
+			xterm := prevEntry.Term
+			xindex := prevEntry.Index
 			for xindex > 0 {
-				if rf.log[xindex-1].Term != xterm {
+				if rf.lookupEntryByIndex(xindex-1).Term != xterm {
 					break
 				}
 				xindex--
 			}
 			reply.XTerm = xterm // conflicting term
 			reply.XIndex = xindex // index of first entry with that term 
-			reply.XLen = xlen // useless now...
+			reply.XNextIndex = -1 // useless now...
 		}
 		return
 	}
 	reply.Success = true
 
 	nextIndex := args.PrevLogIndex+1
-	if nextIndex < len(rf.log) {
+	if nextIndex <= lastLogIndex {
 		// (partial) entries already exists in follower's log.
 		// Check confliciting entries with leader (If an existing entry conflicts with a new one (same index but different terms)
-		if rf.log[nextIndex].Term != args.Term {
+		if rf.lookupEntryByIndex(nextIndex).Term != args.Term {
 			// It conflicts.
 			// Discard confliciting entries with leader: delete the existing entry and all that follow it
-			rf.log = rf.log[:nextIndex]
+			rf.discardEntriesFrom(nextIndex)
 		} else {
 			// (Maybe partial) duplicated AppendEntries from same leader...
 			// Check whether some entries can save
-			if nextIndex+len(args.Entries) > len(rf.log) {
-				// [nextIndex, extIndex+len(args.Entries)) is a bigger ranger than [nextIndex, len(rf.log))
-				// check duplicated entries really same
-				for i:=0; i<len(rf.log)-nextIndex; i++ {
-					if args.Entries[i].Term != rf.log[args.Entries[i].Index].Term {
+			if args.PrevLogIndex+len(args.Entries) > lastLogIndex {
+				// check prefix-duplicated entries really identical
+				for i:=0; i<lastLogIndex-args.PrevLogIndex; i++ {
+					if args.Entries[i].Term != rf.lookupEntryByIndex(args.Entries[i].Index).Term {
 						reply.Success = false
 						DPrintf("[term%v node%v Follower] faulty leader %v send AppendEntries with same index but different content", rf.currentTerm, rf.me, args.LeaderId)
 						return
 					}
 				}
-				args.Entries = args.Entries[len(rf.log)-nextIndex:]
+				args.Entries = args.Entries[lastLogIndex-args.PrevLogIndex:]
 			} else {
 				// drop the duplicated AppendEntries request
 				return
@@ -403,7 +426,7 @@ func (rf *Raft) applyEntries() {
 		rf.lastApplied++
 		rf.applyCh <- raftapi.ApplyMsg{
 			CommandValid:  true,
-			Command:       rf.log[rf.lastApplied].Command,
+			Command:       rf.lookupEntryByIndex(rf.lastApplied).Command,
 			CommandIndex:  rf.lastApplied,
 		}
 		DPrintf("[node%v applyEntries] apply log %v", rf.me, rf.lastApplied)
@@ -425,21 +448,22 @@ func (rf *Raft) applyEntries() {
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	index = len(rf.log)
+	index = rf.getLastLogIndex() + 1
 	term = rf.currentTerm
 	isLeader = rf.role == ROLE_LEADER
 	if !isLeader {
 		return
 	}
-	rf.log = append(rf.log, Entry{
+	entry := Entry{
 		Term: term,
 		Index: index,
 		Command: command,
-	})
+	}
+	rf.log = append(rf.log, entry)
 	rf.persist()
 	rf.nextIndex[rf.me]= index + 1
 	rf.matchIndex[rf.me]= index
-	DPrintf("[term%v node%v Leader] append an new entry %v", rf.currentTerm, rf.me, &rf.log[index])
+	DPrintf("[term%v node%v Leader] append an new entry %v", rf.currentTerm, rf.me, entry)
 	return
 }
 
@@ -617,19 +641,19 @@ func (rf *Raft) startReplication(term int) bool {
 		return false
 	}
 
+	lastLogIndex := rf.getLastLogIndex()
 	for peerIdx := range rf.peers {
 		if peerIdx == rf.me {
 			continue
 		}
 
 		nextIndex := rf.nextIndex[peerIdx]
-		endIndex := len(rf.log)
 		args := &AppendEntriesArgs{
 			Term:         term,
 			LeaderId:     rf.me,
 			PrevLogIndex: nextIndex-1,
-			PrevLogTerm:  rf.log[nextIndex-1].Term,
-			Entries:      rf.log[nextIndex : endIndex],
+			PrevLogTerm:  rf.lookupEntryByIndex(nextIndex-1).Term,
+			Entries:      rf.lookupEntriesByIndex(nextIndex, lastLogIndex),
 			LeaderCommit: rf.commitIndex,
 		}
 
@@ -655,9 +679,9 @@ func (rf *Raft) startReplication(term int) bool {
 				return // stop since no longer leader
 			}
 			if reply.Success {
-				rf.nextIndex[peerIdx] = endIndex
-				rf.matchIndex[peerIdx] = endIndex - 1
-				DPrintf("[term%v node%v Leader Replication] peer %v AppendEntries Success num_entries:%v nextIndex:%v Entries:%#v", term, rf.me, peer, len(args.Entries), endIndex, args.Entries)
+				rf.nextIndex[peerIdx] = lastLogIndex + 1
+				rf.matchIndex[peerIdx] = lastLogIndex
+				DPrintf("[term%v node%v Leader Replication] peer %v AppendEntries Success num_entries:%v nextIndex:%v Entries:%#v", term, rf.me, peer, len(args.Entries), lastLogIndex+1, args.Entries)
 			} else {
 				if rf.nextIndex[peerIdx] == 1 {
 					// impossible. faulty peer since log 0(empty sentinel) must be consistent
@@ -667,13 +691,13 @@ func (rf *Raft) startReplication(term int) bool {
 
 				if OPT_BACK_UP_INCONSITENT_IN_TERM {
 					if reply.XTerm == -1 {
-						// follower's log is too short, reset nextIndex to length of the follower's log
-						rf.nextIndex[peerIdx] = reply.XLen
+						// follower's log is too short, reset nextIndex to next index of the follower's log
+						rf.nextIndex[peerIdx] = reply.XNextIndex
 					} else {
 						// follower's log has conflicting entries.
-						if reply.XIndex >= len(rf.log) {
-							// impossible. faulty peer since reply.XIndex <= args.PrevLogIndex < len(rf.log)
-							DPrintf("[term%v node%v Leader Replication] faulty peer %v reply XIndex >= len(rf.log).", term, rf.me, peer)
+						if reply.XIndex > lastLogIndex {
+							// impossible. faulty peer since reply.XIndex <= args.PrevLogIndex <= lastLogIndex
+							DPrintf("[term%v node%v Leader Replication] faulty peer %v reply XIndex > lastLogIndex.", term, rf.me, peer)
 							return // give up to replicate to this peer
 						}
 						// the conflicting term maybe partially valid (commited)
@@ -681,10 +705,10 @@ func (rf *Raft) startReplication(term int) bool {
 						// if entry exists in leader's log, it must be commited already
 						// so, if any entry whose term is XTerm , the XIndex is valid and 
 						// otherwise, the entrire term is invalid and need to be overrite
-						if rf.log[reply.XIndex].Term == reply.XTerm {
+						if rf.lookupEntryByIndex(reply.XIndex).Term == reply.XTerm {
 							// XIndex is index of first entry with that term, and maybe more entries are commited alreay in leader's log
 							nextIndex := reply.XIndex + 1
-							for nextIndex < len(rf.log) && rf.log[nextIndex].Term == reply.XTerm {
+							for nextIndex <= lastLogIndex && rf.lookupEntryByIndex(nextIndex).Term == reply.XTerm {
 								nextIndex++
 							}
 							rf.nextIndex[peerIdx] = nextIndex
@@ -701,8 +725,8 @@ func (rf *Raft) startReplication(term int) bool {
 		}(peerIdx, args)
 	}
 	// bump commit index in leader if majarity replicated
-	for nextCommitIndex := rf.commitIndex+1; nextCommitIndex<len(rf.log); nextCommitIndex++{
-		if rf.log[nextCommitIndex].Term != rf.currentTerm {
+	for nextCommitIndex := rf.commitIndex+1; nextCommitIndex<=lastLogIndex; nextCommitIndex++{
+		if rf.lookupEntryByIndex(nextCommitIndex).Term != rf.currentTerm {
 			continue // only directly commit current term
 		}
 		// count replication for log[nextCommitIndex]
