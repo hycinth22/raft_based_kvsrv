@@ -58,7 +58,6 @@ type Raft struct {
 func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
-	// Your code here (3A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	term = rf.currentTerm
@@ -124,6 +123,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 
 func (rf *Raft) intoFollower(term int) {
+	DPrintf("[%v Follower] will be follower in term %v", rf.me, term)
 	rf.role = ROLE_FOLLOWER
 	rf.votedFor = -1
 	rf.currentTerm = term
@@ -139,7 +139,6 @@ type RequestVoteArgs struct {
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (3A).
 	Term        int
 	VoteGranted bool // true means candidate received vote
 }
@@ -159,14 +158,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// new term
 	if args.Term > rf.currentTerm {
 		rf.intoFollower(args.Term)
+		// then processing the request in new term
 	}
 
 	// contending or duplicated vote request
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+		DPrintf("[%v Follower] refused peer %v vote of term %v since i has voted to %v", rf.me, args.CandidateId, rf.currentTerm, rf.votedFor)
 		reply.VoteGranted = false
 		return
 	}
 
+	if rf.votedFor == -1 {
+		DPrintf("[%v Follower] grant peer %v vote of term %v", rf.me, args.CandidateId, rf.currentTerm)
+	} else {
+		if rf.votedFor != args.CandidateId {
+			panic("rf.votedFor == args.CandidateId")
+		}
+		DPrintf("[%v Follower] (duplicated)grant peer %v vote of term %v", rf.me, args.CandidateId, rf.currentTerm)
+	}
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateId
 }
@@ -218,14 +227,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 
-	// check stale request
+	// Check stale request
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		return
 	}
 
-	if args.Term >= rf.currentTerm {
+	// Switch to Follower if newer term found
+	if args.Term > rf.currentTerm {
 		rf.intoFollower(args.Term)
+		// then processing the request in new term
 	}
 
 	rf.lastSync = time.Now()
@@ -284,19 +295,20 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-
-		// Your code here (3A)
-		// Check if a leader election should be started.
 		rf.mu.Lock()
+		// Check if a leader election should be started.
 		if rf.role != ROLE_LEADER && time.Since(rf.lastSync) > rf.electionTimeout {
+			// convert to a candidate
 			rf.currentTerm++
 			rf.role = ROLE_CANDIDATE
 			rf.votedFor = rf.me
 			term := rf.currentTerm
+			DPrintf("[%v Candidate] start an election of term %v", rf.me, rf.currentTerm)
 
 			voted := 1 // vote from self
-			askVoteFromPeer := func(peerIndex int, args *RequestVoteArgs) {
+			requestVoteFromPeer := func(peerIndex int, args *RequestVoteArgs) {
 				reply := &RequestVoteReply{}
+				DPrintf("[%v Candidate] request peer %v 's vote of term %v", rf.me, peerIndex, rf.currentTerm)
 				ok := rf.sendRequestVote(peerIndex, args, reply)
 
 				rf.mu.Lock()
@@ -308,27 +320,28 @@ func (rf *Raft) ticker() {
 				// discover new term
 				if reply.Term > rf.currentTerm {
 					rf.intoFollower(reply.Term)
-					return
+					return // stop since no longer candidate
 				}
 
-				// check the context
+				// check the context: if the node has win the election(so become a ledaer) or no longer candidate(due to newer term found), then stop to request vote
 				if rf.role != ROLE_CANDIDATE || rf.currentTerm != term {
 					return
 				}
 
 				// count the votes
 				if reply.VoteGranted {
+					DPrintf("[%v Candidate] got peer %v 's vote of term %v", rf.me, peerIndex, rf.currentTerm)
 					voted++
+				} else {
+					DPrintf("[%v Candidate] refused by peer %v about vote of term %v", rf.me, peerIndex, rf.currentTerm)
 				}
 
+				DPrintf("[%v Candidate] collect %v vote(s) of term %v", rf.me, voted, rf.currentTerm)
 				if voted >= (len(rf.peers)+1)/2 && rf.role == ROLE_CANDIDATE {
+					DPrintf("[%v Candidate] win the election of term %v", rf.me, rf.currentTerm)
 					rf.role = ROLE_LEADER
 					go rf.replicationTicker(term)
 				}
-			}
-
-			if rf.role != ROLE_CANDIDATE || rf.currentTerm != term {
-				return
 			}
 
 			for i := range rf.peers {
@@ -341,7 +354,7 @@ func (rf *Raft) ticker() {
 					CandidateId: rf.me,
 				}
 
-				go askVoteFromPeer(i, args)
+				go requestVoteFromPeer(i, args)
 			}
 
 		}
@@ -427,7 +440,8 @@ func (rf *Raft) startReplication(term int) bool {
 			// discover newer term
 			if reply.Term > rf.currentTerm {
 				rf.intoFollower(reply.Term)
-				return
+				return // stop since no longer leader
+			}
 			}
 		}(peerIdx, args)
 	}
