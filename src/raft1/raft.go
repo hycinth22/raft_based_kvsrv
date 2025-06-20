@@ -138,8 +138,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
+// return from leader or candidate state
+// or simply follower update its term learned from peers
+// lock rf.mu before call this
 func (rf *Raft) intoFollower(term int) {
+	if term < rf.currentTerm  {
+		panic("term should be higher(new election) or equal(contending election)")
+	}
 	DPrintf("[term%v node%v Follower] will be follower", term, rf.me)
 	rf.role = ROLE_FOLLOWER
 	rf.votedFor = -1
@@ -532,7 +537,6 @@ func (rf *Raft) startReplication(term int) bool {
 	DPrintf("[term%v node%v Leader Replication] start startReplication", term, rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("[term%v node%v Leader Replication] lock?", term, rf.me)
 
 	if rf.role != ROLE_LEADER || rf.currentTerm != term {
 		if rf.role != ROLE_LEADER {
