@@ -7,13 +7,13 @@ package raft
 // Make() creates a new raft peer that implements the raft interface.
 
 import (
-	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	"6.5840/tester1"
@@ -26,6 +26,9 @@ const (
 	ROLE_LEADER Role = 2
 )
 
+// requirement:
+// replicateInterval <<< electionTimeoutMin < electionTimeoutMax
+// requestRetryInterval < electionTimeoutMin/2
 const (
 	electionTimeoutMin time.Duration = 250 * time.Millisecond
 	electionTimeoutMax time.Duration = 400 * time.Millisecond
@@ -38,8 +41,8 @@ const (
 
 // an entry of log
 type Entry struct {
-	Term int
-	Index int
+	Term    int
+	Index   int
 	Command interface{}
 }
 
@@ -53,17 +56,15 @@ type Raft struct {
 	majarity  int                 // the thresold of majarity
 	applyCh   chan <- raftapi.ApplyMsg
 
-	// Your data here (3C).
-
 	/// election data
 	role            Role
-	currentTerm     int
-	votedFor        int // -1 means vote for none
+	currentTerm     int  // term of leader. persisted
+	votedFor        int  // vote who in the term. -1 means vote for none. persisted
 	lastSync        time.Time
 	electionTimeout time.Duration // random delay
 
 	/// log data and its commit info
-	log         []Entry
+	log         []Entry // log. persisted
 	commitIndex int
 	lastApplied int
 
@@ -84,6 +85,12 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
+type RaftPersistState struct {
+	CurrentTerm int
+	VotedFor    int
+	Log         []Entry
+}
+
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -92,14 +99,17 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (3C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	state := RaftPersistState{
+		CurrentTerm: rf.currentTerm,
+		VotedFor:    rf.votedFor,
+		Log:         rf.log,
+	}
+	e.Encode(state)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
+	DPrintf("[node%v persist] state %#v", rf.me, state)
 }
 
 
@@ -108,19 +118,16 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (3C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var state RaftPersistState
+	if d.Decode(&state) != nil {
+		return
+	}
+	rf.currentTerm = state.CurrentTerm
+	rf.votedFor = state.VotedFor
+	rf.log = state.Log
 }
 
 // how many bytes in Raft's persisted log?
@@ -149,8 +156,9 @@ func (rf *Raft) intoFollower(term int) {
 	}
 	DPrintf("[term%v node%v Follower] will be follower", term, rf.me)
 	rf.role = ROLE_FOLLOWER
-	rf.votedFor = -1
 	rf.currentTerm = term
+	rf.votedFor = -1
+	rf.persist()
 }
 
 // RequestVote RPC arguments structure.
@@ -214,6 +222,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateId
+	rf.persist()
 }
 
 func (rf *Raft) getLastLogIndex() int {
@@ -414,21 +423,23 @@ func (rf *Raft) applyEntries() {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
-	index = -1
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	index = len(rf.log)
 	term = rf.currentTerm
-	isLeader = false
-    if rf.role != ROLE_LEADER {
+	isLeader = rf.role == ROLE_LEADER
+	if !isLeader {
 		return
 	}
-	isLeader = true
-	index = len(rf.log)
 	rf.log = append(rf.log, Entry{
 		Term: term,
 		Index: index,
 		Command: command,
 	})
+	rf.persist()
 	rf.nextIndex[rf.me]= index + 1
 	rf.matchIndex[rf.me]= index
+	DPrintf("[term%v node%v Leader] append an new entry %v", rf.currentTerm, rf.me, &rf.log[index])
 	return
 }
 
@@ -443,7 +454,8 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
+	rf.persist()
+	DPrintf("node %v stop\n %#v", rf.me, rf)
 }
 
 func (rf *Raft) killed() bool {
@@ -469,10 +481,12 @@ func (rf *Raft) maybeStartElection() {
 	// Check if a leader election should be started.
 	if rf.role != ROLE_LEADER && time.Since(rf.lastSync) > rf.electionTimeout {
 		// convert to a candidate
-		rf.currentTerm++
 		rf.role = ROLE_CANDIDATE
+		rf.currentTerm++
 		rf.votedFor = rf.me
-		DPrintf("[term%v node%v Candidate] start an election", rf.currentTerm, rf.me,)
+		rf.persist()
+
+		DPrintf("[term%v node%v Candidate] start an election", rf.currentTerm, rf.me)
 
 		voted := 1 // vote from self
 		for i := range rf.peers {
@@ -499,14 +513,12 @@ func (rf *Raft) requestVoteFromPeer(peerIndex int, args *RequestVoteArgs, voted 
 	reply := &RequestVoteReply{}
 	DPrintf("[term%v node%v Candidate] request peer %v 's vote", args.Term, args.CandidateId, peerIndex)
 	ok := rf.sendRequestVote(peerIndex, args, reply)
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	if !ok {
 		DPrintf("[term%v node%v Candidate] request peer %v 's vote failed", args.Term, args.CandidateId, peerIndex)
 		return
 	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	// discover new term
 	if reply.Term > rf.currentTerm {
@@ -554,24 +566,25 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	persister *tester.Persister, applyCh chan raftapi.ApplyMsg) raftapi.Raft {
 	rf := &Raft{}
 	rf.peers = peers
-	rf.persister = persister
 	rf.me = me
 	rf.majarity = len(rf.peers)/2+1
-	rf.applyCh = applyCh
-	// Your initialization code here (3C).
+
 	rf.role = ROLE_FOLLOWER
 	rf.currentTerm = 0
 	rf.votedFor = -1
+
+	rf.persister = persister
 	rf.log = make([]Entry, 1, initialLogQueueCapacity)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	DPrintf("node %v start\n %#v", rf.me, rf)
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
@@ -591,7 +604,7 @@ func (rf *Raft) replicationTicker(term int) {
 }
 
 func (rf *Raft) startReplication(term int) bool {
-	DPrintf("[term%v node%v Leader Replication] start startReplication", term, rf.me)
+	DPrintf("[term%v node%v Leader Replication] startReplication", term, rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -612,7 +625,7 @@ func (rf *Raft) startReplication(term int) bool {
 		nextIndex := rf.nextIndex[peerIdx]
 		endIndex := len(rf.log)
 		args := &AppendEntriesArgs{
-			Term:         rf.currentTerm,
+			Term:         term,
 			LeaderId:     rf.me,
 			PrevLogIndex: nextIndex-1,
 			PrevLogTerm:  rf.log[nextIndex-1].Term,
@@ -628,11 +641,10 @@ func (rf *Raft) startReplication(term int) bool {
 				DPrintf("[term%v node%v Leader Replication] peer %v sendAppendEntries failed", args.Term, args.LeaderId, peer)
 				return
 			}
-
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 
-			if rf.role != ROLE_LEADER || rf.currentTerm != term {
+			if rf.role != ROLE_LEADER || rf.currentTerm != args.Term {
 				DPrintf("[term%v node%v Leader Replication] peer %v stop", term, rf.me, peerIdx)
 				return
 			}
@@ -689,7 +701,6 @@ func (rf *Raft) startReplication(term int) bool {
 		}(peerIdx, args)
 	}
 	// bump commit index in leader if majarity replicated
-
 	for nextCommitIndex := rf.commitIndex+1; nextCommitIndex<len(rf.log); nextCommitIndex++{
 		if rf.log[nextCommitIndex].Term != rf.currentTerm {
 			continue // only directly commit current term
