@@ -347,7 +347,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		return
 	}
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // preceding entry whose term is conflicting
+	if rf.lookupEntryByIndex(args.PrevLogIndex).Term != args.PrevLogTerm { // preceding entry whose term is conflicting
 		reply.Success = false
 		if OPT_BACK_UP_INCONSITENT_IN_TERM {
 			// find index of the first entry in the conflicting term
