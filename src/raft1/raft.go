@@ -285,6 +285,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
+	DPrintf("[term%v node%v Follower] AppendEntriesArgs %#v", rf.currentTerm, rf.me, args)
 
 	// Check stale request
 	if args.Term < rf.currentTerm {
@@ -334,14 +335,39 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Success = true
 
-	// Discard confliciting entries with leader: If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
 	nextIndex := args.PrevLogIndex+1
-	if len(rf.log) > nextIndex && rf.log[nextIndex].Term != args.Term {
-		rf.log = rf.log[:nextIndex]
+	if nextIndex < len(rf.log) {
+		// (partial) entries already exists in follower's log.
+		// Check confliciting entries with leader (If an existing entry conflicts with a new one (same index but different terms)
+		if rf.log[nextIndex].Term != args.Term {
+			// It conflicts.
+			// Discard confliciting entries with leader: delete the existing entry and all that follow it
+			rf.log = rf.log[:nextIndex]
+		} else {
+			// (Maybe partial) duplicated AppendEntries from same leader...
+			// Check whether some entries can save
+			if nextIndex+len(args.Entries) > len(rf.log) {
+				// [nextIndex, extIndex+len(args.Entries)) is a bigger ranger than [nextIndex, len(rf.log))
+				// check duplicated entries really same
+				for i:=0; i<len(rf.log)-nextIndex; i++ {
+					if args.Entries[i].Term != rf.log[args.Entries[i].Index].Term {
+						reply.Success = false
+						DPrintf("[term%v node%v Follower] faulty leader %v send AppendEntries with same index but different content", rf.currentTerm, rf.me, args.LeaderId)
+						return
+					}
+				}
+				args.Entries = args.Entries[len(rf.log)-nextIndex:]
+			} else {
+				// drop the duplicated AppendEntries request
+				return
+			}
+		}
+	} else {
+		// Append any new entries not already in the log
+		rf.log = append(rf.log, args.Entries...)
+		rf.persist()
 	}
 
-	// Append any new entries not already in the log
-	rf.log = append(rf.log, args.Entries...)
 	// keep commitIndex latest with leader
 	if args.LeaderCommit > rf.commitIndex {
 		DPrintf("[term%v node%v Follower] learn commitIndex %v from leader", rf.currentTerm, rf.me, args.LeaderCommit)
