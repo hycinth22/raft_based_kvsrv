@@ -171,9 +171,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		if index <= rf.snapshot.lastSnapshotIndex {
 			return
 		}
-		if index < rf.commitIndex {
-			rf.commitIndex = index
-			// panic("client snapshot include uncommited entry")
+		if index > rf.commitIndex {
+			panic("client snapshot include uncommited entry")
 		}
 		DPrintf("[term%v node%v Snapshot] Snapshot %v", rf.currentTerm, rf.me, index)
 		entry := rf.lookupEntryByIndex(index)
