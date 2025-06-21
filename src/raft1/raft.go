@@ -820,13 +820,14 @@ func (rf *Raft) startReplication(term int) bool {
 	installSnapShotToPeer := func(peer int, args *InstallSnapshotArgs) bool {
 		reply := &InstallSnapshotReply{}
 		ok := rf.sendInstallSnapshot(peer, args, reply)
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
 		if ok {
 			// discover newer term
 			if reply.Term > rf.currentTerm {
 				rf.intoFollower(reply.Term)
 				return ok // stop since no longer leader
 			}
-
 			rf.nextIndex[peer] = args.LastIncludedIndex + 1
 			rf.matchIndex[peer] = args.LastIncludedIndex
 		}
