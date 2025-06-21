@@ -716,12 +716,24 @@ func (rf *Raft) startReplication(term int) bool {
 		}
 
 		nextIndex := rf.nextIndex[peerIdx]
+		prevLogIndex := nextIndex-1
+		prevLogTerm := rf.lookupEntryByIndex(nextIndex-1).Term
+		entries := rf.lookupEntriesByIndex(nextIndex, lastLogIndex)
+		// sanity check for entries
+		if len(entries) > 0  {
+			if entries[0].Index != nextIndex {
+				panic("first entry's index is incorrect")
+			}
+			if entries[len(entries)-1].Index != prevLogIndex+len(entries) {
+				panic("last entry's index is incorrect")
+			}
+		}
 		args := &AppendEntriesArgs{
 			Term:         term,
 			LeaderId:     rf.me,
-			PrevLogIndex: nextIndex-1,
-			PrevLogTerm:  rf.lookupEntryByIndex(nextIndex-1).Term,
-			Entries:      rf.lookupEntriesByIndex(nextIndex, lastLogIndex),
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      entries,
 			LeaderCommit: rf.commitIndex,
 		}
 
