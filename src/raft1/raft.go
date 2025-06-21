@@ -654,6 +654,8 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.persist()
 	DPrintf("node %v stop\n %#v", rf.me, rf)
 }
@@ -910,12 +912,14 @@ func (rf *Raft) startReplication(term int) bool {
 		}
 
 		if rf.nextIndex[peerIdx] <= rf.snapshot.lastSnapshotIndex {
+			data := make([]byte, len(rf.snapshot.data))
+			copy(data, rf.snapshot.data) // avoiding data-race, we will unlock during the request
 			args := &InstallSnapshotArgs{
 				Term:              term,
 				LeaderId:          rf.me,
 				LastIncludedIndex: rf.snapshot.lastSnapshotIndex,
 				LastIncludedTerm:  rf.snapshot.lastSnapshotTerm,
-				Data:              rf.snapshot.data,
+				Data:              data,
 			}
 			go installSnapShotToPeer(peerIdx, args)
 		} else {
@@ -924,13 +928,16 @@ func (rf *Raft) startReplication(term int) bool {
 			prevLogIndex := nextIndex-1
 			prevLogTerm := rf.lookupEntryByIndex(nextIndex-1).Term
 			entries := rf.lookupEntriesByIndex(nextIndex, lastLogIndex)
+			entriesCopy := make([]Entry, len(entries)) // avoiding data-race, we will unlock during the request
+			copy(entriesCopy, entries)
+			// sanity check for entries
 			DPrintf("[term%v node%v Leader Replication] nextIndex%v lastLogIndex%v", term, rf.me, nextIndex, lastLogIndex)
 			DPrintf("[term%v node%v Leader Replication] log%#v", term, rf.me, rf.log)
 			DPrintf("[term%v node%v Leader Replication] snapshot%#v", term, rf.me, rf.snapshot)
-			if len(entries) > 0  {
-				for i, e := range entries {
+			if len(entriesCopy) > 0  {
+				for i, e := range entriesCopy {
 					DPrintf("[term%v node%v Leader Replication] entries[%v]: %v", term, rf.me, i, e)
-					if entries[i].Index != nextIndex+i {
+					if entriesCopy[i].Index != nextIndex+i {
 						panic("entry's index is incorrect")
 					}
 					if e.Command == nil {
@@ -943,7 +950,7 @@ func (rf *Raft) startReplication(term int) bool {
 				LeaderId:     rf.me,
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
-				Entries:      entries,
+				Entries:      entriesCopy,
 				LeaderCommit: rf.commitIndex,
 			}
 			go appendEntriesToPeer(peerIdx, args, lastLogIndex)
