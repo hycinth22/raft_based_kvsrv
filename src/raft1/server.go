@@ -107,7 +107,7 @@ func (rs *rfsrv) applier(applyCh chan raftapi.ApplyMsg) {
 				err_msg = fmt.Sprintf("server %v apply out of order %v", rs.me, m.CommandIndex)
 			}
 			if err_msg != "" {
-				tester.AnnotateCheckerFailureBeforeExit("apply error", err_msg)
+				tester.AnnotateCheckerFailureBeforeExit("apply error cmd", err_msg)
 				log.Fatalf("apply error: %v", err_msg)
 				rs.applyErr = err_msg
 				// keep reading after error so that Raft doesn't block
@@ -162,7 +162,7 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 			// Ignore other types of ApplyMsg.
 		}
 		if err_msg != "" {
-			tester.AnnotateCheckerFailureBeforeExit("apply error", err_msg)
+			tester.AnnotateCheckerFailureBeforeExit("apply error snap", err_msg)
 			log.Fatalf("apply error: %v", err_msg)
 			rs.applyErr = err_msg
 			// keep reading after error so that Raft doesn't block

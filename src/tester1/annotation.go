@@ -208,6 +208,8 @@ func GetAnnotationFinalized() bool {
 
 // Used before log.Fatalf
 func AnnotateCheckerFailureBeforeExit(desp, details string) {
+	fmt.Println(desp)
+	fmt.Println(details)
 	AnnotateCheckerFailure(desp, details)
 	annotation.cleanup(true, "test failed")
 }

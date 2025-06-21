@@ -911,6 +911,7 @@ func TestFigure83C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
+		// asks a leader, if there is one, to insert a command in the Raft log.
 		leader := -1
 		for i := 0; i < servers; i++ {
 			rf := ts.srvs[i].Raft()
@@ -933,12 +934,15 @@ func TestFigure83C(t *testing.T) {
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 
+		// fail quickly with a high probability (perhaps without committing the command)
+		// or crash after a while with low probability (most likey committing the command)
 		if leader != -1 {
 			ts.g.ShutdownServer(leader)
 			tester.AnnotateShutdown([]int{leader})
 			nup -= 1
 		}
 
+		// If the number of alive servers isn't enough to form a majority, perhaps start a new server.
 		if nup < 3 {
 			s := rand.Int() % servers
 			if ts.srvs[s].Raft() == nil {
@@ -949,6 +953,8 @@ func TestFigure83C(t *testing.T) {
 		}
 	}
 
+
+	// RestartAll
 	for i := 0; i < servers; i++ {
 		if ts.srvs[i].Raft() == nil {
 			ts.restart(i)
@@ -956,6 +962,7 @@ func TestFigure83C(t *testing.T) {
 	}
 	tester.AnnotateRestartAll()
 
+	// restart one
 	ts.one(rand.Int(), servers, true)
 }
 
