@@ -641,8 +641,7 @@ func (rf *Raft) startReplication(term int) bool {
 		return false
 	}
 
-	lastLogIndex := rf.getLastLogIndex()
-	appendEntriesToPeer := func(peer int, args *AppendEntriesArgs) {
+	appendEntriesToPeer := func(peer int, args *AppendEntriesArgs, lastEntryIndex int) {
 		reply := &AppendEntriesReply{}
 		DPrintf("[term%v node%v Leader Replication] peer %v sendAppendEntries", args.Term, args.LeaderId, peer)
 		ok := rf.sendAppendEntries(peer, args, reply)
@@ -664,10 +663,11 @@ func (rf *Raft) startReplication(term int) bool {
 			return // stop since no longer leader
 		}
 		if reply.Success {
-			rf.nextIndex[peer] = lastLogIndex + 1
-			rf.matchIndex[peer] = lastLogIndex
-			DPrintf("[term%v node%v Leader Replication] peer %v AppendEntries Success num_entries:%v nextIndex:%v Entries:%#v", term, rf.me, peer, len(args.Entries), lastLogIndex+1, args.Entries)
+			rf.nextIndex[peer] = lastEntryIndex + 1
+			rf.matchIndex[peer] = lastEntryIndex
+			DPrintf("[term%v node%v Leader Replication] peer %v AppendEntries Success num_entries:%v nextIndex:%v Entries:%#v", term, rf.me, peer, len(args.Entries), rf.nextIndex[peer], args.Entries)
 		} else {
+			lastLogIndex := rf.getLastLogIndex()
 			if rf.nextIndex[peer] == 1 {
 				// impossible. faulty peer since log 0(empty sentinel) must be consistent
 				DPrintf("[term%v node%v Leader Replication] faulty peer %v inconsistent with sentinel log entry.", term, rf.me, peer)
@@ -709,6 +709,7 @@ func (rf *Raft) startReplication(term int) bool {
 		}
 	}
 
+	lastLogIndex := rf.getLastLogIndex()
 	for peerIdx := range rf.peers {
 		if peerIdx == rf.me {
 			continue
@@ -724,7 +725,7 @@ func (rf *Raft) startReplication(term int) bool {
 			LeaderCommit: rf.commitIndex,
 		}
 
-		go appendEntriesToPeer(peerIdx, args)
+		go appendEntriesToPeer(peerIdx, args, lastLogIndex)
 	}
 
 	// bump commit index in leader if majarity replicated
