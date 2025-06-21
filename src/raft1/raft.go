@@ -64,14 +64,14 @@ type Raft struct {
 
 	/// election data
 	role            Role
-	currentTerm     int  // term of leader. persisted
-	votedFor        int  // vote who in the term. -1 means vote for none. persisted
+	currentTerm     int  // term of leader. persisted to avoid following a superseded leader or voting in a superseded election.
+	votedFor        int  // vote who in the term. -1 means vote for none. persisted to prevent a client from voting for one candidate, then reboot, then vote for a different candidate in the same term could lead to two leaders for the same term
 	lastSync        time.Time
 	electionTimeout time.Duration // random delay
 
 	/// log data and its commit info
 	muLog       sync.Mutex // Lock to protect shared access to lLog
-	log         []Entry    // log. persisted. note: index != Entry.Index
+	log         []Entry    // log. . note: index != Entry.Index. persisted: if a server was in leader's majority for committing an entry, must remember entry despite reboot, so next leader's vote majority includes the entry, so Election Restriction ensuresnew leader also has the entry.
 	commitIndex int        // note: it's not a array index
 	lastApplied int
 
