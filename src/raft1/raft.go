@@ -642,6 +642,73 @@ func (rf *Raft) startReplication(term int) bool {
 	}
 
 	lastLogIndex := rf.getLastLogIndex()
+	appendEntriesToPeer := func(peer int, args *AppendEntriesArgs) {
+		reply := &AppendEntriesReply{}
+		DPrintf("[term%v node%v Leader Replication] peer %v sendAppendEntries", args.Term, args.LeaderId, peer)
+		ok := rf.sendAppendEntries(peer, args, reply)
+		if !ok {
+			DPrintf("[term%v node%v Leader Replication] peer %v sendAppendEntries failed", args.Term, args.LeaderId, peer)
+			return
+		}
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		if rf.role != ROLE_LEADER || rf.currentTerm != args.Term {
+			DPrintf("[term%v node%v Leader Replication] peer %v stop", term, rf.me, peer)
+			return
+		}
+
+		// discover newer term
+		if reply.Term > rf.currentTerm {
+			rf.intoFollower(reply.Term)
+			return // stop since no longer leader
+		}
+		if reply.Success {
+			rf.nextIndex[peer] = lastLogIndex + 1
+			rf.matchIndex[peer] = lastLogIndex
+			DPrintf("[term%v node%v Leader Replication] peer %v AppendEntries Success num_entries:%v nextIndex:%v Entries:%#v", term, rf.me, peer, len(args.Entries), lastLogIndex+1, args.Entries)
+		} else {
+			if rf.nextIndex[peer] == 1 {
+				// impossible. faulty peer since log 0(empty sentinel) must be consistent
+				DPrintf("[term%v node%v Leader Replication] faulty peer %v inconsistent with sentinel log entry.", term, rf.me, peer)
+				return // give up to replicate to this peer
+			}
+
+			if OPT_BACK_UP_INCONSITENT_IN_TERM {
+				if reply.XTerm == -1 {
+					// follower's log is too short, reset nextIndex to next index of the follower's log
+					rf.nextIndex[peer] = reply.XNextIndex
+				} else {
+					// follower's log has conflicting entries.
+					if reply.XIndex > lastLogIndex {
+						// impossible. faulty peer since reply.XIndex <= args.PrevLogIndex <= lastLogIndex
+						DPrintf("[term%v node%v Leader Replication] faulty peer %v reply XIndex > lastLogIndex.", term, rf.me, peer)
+						return // give up to replicate to this peer
+					}
+					// the conflicting term maybe partially valid (commited)
+					//
+					// if entry exists in leader's log, it must be commited already
+					// so, if any entry whose term is XTerm , the XIndex is valid and 
+					// otherwise, the entrire term is invalid and need to be overrite
+					if rf.lookupEntryByIndex(reply.XIndex).Term == reply.XTerm {
+						// XIndex is index of first entry with that term, and maybe more entries are commited alreay in leader's log
+						nextIndex := reply.XIndex + 1
+						for nextIndex <= lastLogIndex && rf.lookupEntryByIndex(nextIndex).Term == reply.XTerm {
+							nextIndex++
+						}
+						rf.nextIndex[peer] = nextIndex
+					} else {
+						// XIndex is index of first entry with that term, so there is no one entry whose term is XTerm in leader's log
+						rf.nextIndex[peer] = reply.XIndex
+					}
+				}
+			} else {
+				rf.nextIndex[peer]--
+			}
+			DPrintf("[term%v node%v Leader Replication] peer %v nextIndex updated %v", term, rf.me, peer, rf.nextIndex)
+		}
+	}
+
 	for peerIdx := range rf.peers {
 		if peerIdx == rf.me {
 			continue
@@ -657,73 +724,9 @@ func (rf *Raft) startReplication(term int) bool {
 			LeaderCommit: rf.commitIndex,
 		}
 
-		go func(peer int, args *AppendEntriesArgs) {
-			reply := &AppendEntriesReply{}
-			DPrintf("[term%v node%v Leader Replication] peer %v sendAppendEntries", args.Term, args.LeaderId, peer)
-			ok := rf.sendAppendEntries(peer, args, reply)
-			if !ok {
-				DPrintf("[term%v node%v Leader Replication] peer %v sendAppendEntries failed", args.Term, args.LeaderId, peer)
-				return
-			}
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-
-			if rf.role != ROLE_LEADER || rf.currentTerm != args.Term {
-				DPrintf("[term%v node%v Leader Replication] peer %v stop", term, rf.me, peerIdx)
-				return
-			}
-
-			// discover newer term
-			if reply.Term > rf.currentTerm {
-				rf.intoFollower(reply.Term)
-				return // stop since no longer leader
-			}
-			if reply.Success {
-				rf.nextIndex[peerIdx] = lastLogIndex + 1
-				rf.matchIndex[peerIdx] = lastLogIndex
-				DPrintf("[term%v node%v Leader Replication] peer %v AppendEntries Success num_entries:%v nextIndex:%v Entries:%#v", term, rf.me, peer, len(args.Entries), lastLogIndex+1, args.Entries)
-			} else {
-				if rf.nextIndex[peerIdx] == 1 {
-					// impossible. faulty peer since log 0(empty sentinel) must be consistent
-					DPrintf("[term%v node%v Leader Replication] faulty peer %v inconsistent with sentinel log entry.", term, rf.me, peer)
-					return // give up to replicate to this peer
-				}
-
-				if OPT_BACK_UP_INCONSITENT_IN_TERM {
-					if reply.XTerm == -1 {
-						// follower's log is too short, reset nextIndex to next index of the follower's log
-						rf.nextIndex[peerIdx] = reply.XNextIndex
-					} else {
-						// follower's log has conflicting entries.
-						if reply.XIndex > lastLogIndex {
-							// impossible. faulty peer since reply.XIndex <= args.PrevLogIndex <= lastLogIndex
-							DPrintf("[term%v node%v Leader Replication] faulty peer %v reply XIndex > lastLogIndex.", term, rf.me, peer)
-							return // give up to replicate to this peer
-						}
-						// the conflicting term maybe partially valid (commited)
-						//
-						// if entry exists in leader's log, it must be commited already
-						// so, if any entry whose term is XTerm , the XIndex is valid and 
-						// otherwise, the entrire term is invalid and need to be overrite
-						if rf.lookupEntryByIndex(reply.XIndex).Term == reply.XTerm {
-							// XIndex is index of first entry with that term, and maybe more entries are commited alreay in leader's log
-							nextIndex := reply.XIndex + 1
-							for nextIndex <= lastLogIndex && rf.lookupEntryByIndex(nextIndex).Term == reply.XTerm {
-								nextIndex++
-							}
-							rf.nextIndex[peerIdx] = nextIndex
-						} else {
-							// XIndex is index of first entry with that term, so there is no one entry whose term is XTerm in leader's log
-							rf.nextIndex[peerIdx] = reply.XIndex
-						}
-					}
-				} else {
-					rf.nextIndex[peerIdx]--
-				}
-				DPrintf("[term%v node%v Leader Replication] peer %v nextIndex updated %v", term, rf.me, peer, rf.nextIndex)
-			}
-		}(peerIdx, args)
+		go appendEntriesToPeer(peerIdx, args)
 	}
+
 	// bump commit index in leader if majarity replicated
 	for nextCommitIndex := rf.commitIndex+1; nextCommitIndex<=lastLogIndex; nextCommitIndex++{
 		if rf.lookupEntryByIndex(nextCommitIndex).Term != rf.currentTerm {
