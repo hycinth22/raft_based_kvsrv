@@ -811,6 +811,36 @@ func (rf *Raft) replicationTicker(term int) {
 	}
 }
 
+func (rf *Raft) leaderBumpCommit() {
+	// if rf.role != ROLE_LEADER || rf.currentTerm != term {
+	// 	DPrintf("[term%v node%v Leader Applier] Leader Applier stop", term, rf.me)
+	// 	return
+	// }
+
+	// bump commit index in leader if majarity replicated
+	lastLogIndex := rf.getLastLogIndex()
+	if rf.commitIndex < rf.snapshot.lastSnapshotIndex {
+		rf.commitIndex = rf.snapshot.lastSnapshotIndex
+	}
+	for nextCommitIndex := rf.commitIndex+1; nextCommitIndex<=lastLogIndex; nextCommitIndex++{
+		if rf.lookupEntryByIndex(nextCommitIndex).Term != rf.currentTerm {
+			continue // only directly commit current term
+		}
+		// count replication for log[nextCommitIndex]
+		numReplica := 0
+		for i := range rf.peers {
+			if rf.matchIndex[i] >= nextCommitIndex {
+				numReplica++
+			}
+		}
+		if numReplica >= rf.majarity  {
+			rf.commitIndex = nextCommitIndex
+			DPrintf("[term%v node%v Leader Replication] set commitIndex to %v", rf.currentTerm, rf.me, rf.commitIndex)
+		}
+	}
+	rf.applyEntries()
+}
+
 func (rf *Raft) startReplication(term int) bool {
 	DPrintf("[term%v node%v Leader Replication] startReplication", term, rf.me)
 	rf.mu.Lock()
@@ -912,6 +942,7 @@ func (rf *Raft) startReplication(term int) bool {
 		}
 	}
 
+	rf.leaderBumpCommit()
 	for peerIdx := range rf.peers {
 		if peerIdx == rf.me {
 			continue
@@ -962,28 +993,5 @@ func (rf *Raft) startReplication(term int) bool {
 			go appendEntriesToPeer(peerIdx, args, lastLogIndex)
 		}
 	}
-
-	// bump commit index in leader if majarity replicated
-	lastLogIndex := rf.getLastLogIndex()
-	if rf.commitIndex < rf.snapshot.lastSnapshotIndex {
-		rf.commitIndex = rf.snapshot.lastSnapshotIndex
-	}
-	for nextCommitIndex := rf.commitIndex+1; nextCommitIndex<=lastLogIndex; nextCommitIndex++{
-		if rf.lookupEntryByIndex(nextCommitIndex).Term != rf.currentTerm {
-			continue // only directly commit current term
-		}
-		// count replication for log[nextCommitIndex]
-		numReplica := 0
-		for i := range rf.peers {
-			if rf.matchIndex[i] >= nextCommitIndex {
-				numReplica++
-			}
-		}
-		if numReplica >= rf.majarity  {
-			rf.commitIndex = nextCommitIndex
-			DPrintf("[term%v node%v Leader Replication] set commitIndex to %v", term, rf.me, rf.commitIndex)
-		}
-	}
-	rf.applyEntries()
 	return true
 }
