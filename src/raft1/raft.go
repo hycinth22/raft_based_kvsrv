@@ -125,7 +125,7 @@ func (rf *Raft) persist() {
 	e.Encode(state)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, rf.snapshot.data)
-	DPrintf("[node%v persist] state %#v", rf.me, state)
+	rf.dlog("[persist] state %#v", state)
 }
 
 // restore previously persisted state.
@@ -174,7 +174,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		if index > rf.commitIndex {
 			panic("client snapshot include uncommited entry")
 		}
-		DPrintf("[term%v node%v Snapshot] Snapshot %v", rf.currentTerm, rf.me, index)
+		rf.dlog("[Snapshot] Snapshot %v", index)
 		entry := rf.lookupEntryByIndex(index)
 		if entry.Index != index {
 			panic("Snapshot: entry.Index != index")
@@ -199,7 +199,7 @@ func (rf *Raft) intoFollower(term int) {
 	if term < rf.currentTerm  {
 		panic("term should be higher(new election) or equal(contending election)")
 	}
-	DPrintf("[term%v node%v Follower] will be follower", term, rf.me)
+	rf.dlog("[Follower] will be follower")
 	rf.role = ROLE_FOLLOWER
 	rf.currentTerm = term
 	rf.votedFor = -1
@@ -239,9 +239,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.intoFollower(args.Term)
 		// then processing the request in new term
 	}
-	DPrintf("[term%v node%v Follower] InstallSnapshot %#v", rf.currentTerm, rf.me, args)
-	DPrintf("[term%v node%v Follower] snapshot %#v", rf.currentTerm, rf.me, rf.snapshot)
-	DPrintf("[term%v node%v Follower] log %#v", rf.currentTerm, rf.me, rf.log)
+	rf.dlog("[Follower][InstallSnapshot] InstallSnapshotArgs %#v", args)
+	rf.dlog("[Follower][InstallSnapshot] snapshot %#v", rf.snapshot)
+	rf.dlog("[Follower][InstallSnapshot] log %#v", rf.log)
 
 	// new index log inclued or inconsistent with leader snapsoht
 	if args.LastIncludedIndex >= rf.getLastLogIndex() || rf.lookupEntryByIndex(args.LastIncludedIndex).Term != args.LastIncludedTerm {
@@ -319,7 +319,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// contending or duplicated vote request
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
-		DPrintf("[term%v node%v Follower] refused to vote for peer %vsince i has voted to %v", rf.currentTerm, rf.me, args.CandidateId, rf.votedFor)
+		rf.dlog("[Follower RequestVoteHandler] refused to vote for peer %vsince i has voted to %v", args.CandidateId, rf.votedFor)
 		reply.VoteGranted = false
 		return
 	}
@@ -328,18 +328,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	lastLogIndex, lastLogTerm := rf.getLastLogIndexAndTerm()
 	if args.LastLogTerm < lastLogTerm || 
 		(args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex ) {
-		DPrintf("[term%v node%v Follower] refused to vote for peer %v since election restriction", rf.currentTerm, rf.me, args.CandidateId)
+		rf.dlog("[Follower RequestVoteHandler] refused to vote for peer %v since election restriction", args.CandidateId)
 		reply.VoteGranted = false
 		return
 	}
 
 	if rf.votedFor == -1 {
-		DPrintf("[term%v node%v Follower] grant peer %v vote", rf.currentTerm, rf.me, args.CandidateId)
+		rf.dlog("[Follower RequestVoteHandler] grant peer %v vote", args.CandidateId)
 	} else {
 		if rf.votedFor != args.CandidateId {
 			panic("rf.votedFor == args.CandidateId")
 		}
-		DPrintf("[term%v node%v Follower] (duplicated)grant peer %v vote", rf.currentTerm, rf.me, args.CandidateId)
+		rf.dlog("[Follower RequestVoteHandler] (duplicated)grant peer %v vote", args.CandidateId)
 	}
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateId
@@ -391,7 +391,7 @@ func (rf *Raft) lookupEntryPosByIndex(index int) (pos int) {
 		panic("entry cleaned")
 	}
 	pos = index - (rf.snapshot.lastSnapshotIndex + 1)
-	DPrintf("[term%v node%v] lookupEntryPosByIndex %v %v", rf.currentTerm, rf.me, index, pos)
+	rf.dlog("[lookupEntryPosByIndex] %v %v", index, pos)
 	return
 }
 
@@ -400,21 +400,21 @@ func (rf *Raft) discardEntriesUntil(until int) {
 	if until <= rf.snapshot.lastSnapshotIndex {
 		return
 	}
-	DPrintf("[term%v node%v] discardEntriesUntil %v %#v", rf.currentTerm, rf.me, until, rf.log)
+	rf.dlog("[discardEntriesUntil] %v %#v", until, rf.log)
 	pos := rf.lookupEntryPosByIndex(until)
 	rf.log = rf.log[pos+1:]
 }
 
 // discard [fromIndex, end)
 func (rf *Raft) discardEntriesFrom(fromIndex int) {
-	DPrintf("[term%v node%v] discardEntriesFrom %v", rf.currentTerm, rf.me, fromIndex)
+	rf.dlog("[discardEntriesFrom %v]", fromIndex)
 	pos := rf.lookupEntryPosByIndex(fromIndex)
 	rf.log = rf.log[:pos]
 }
 
 // discard all
 func (rf *Raft) discardAllEntries() {
-	DPrintf("[term%v node%v] discardAllEntries", rf.currentTerm, rf.me)
+	rf.dlog("[discardAllEntries]")
 	rf.log = make([]Entry, 0, initialLogQueueCapacity)
 }
 
@@ -477,7 +477,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
-	DPrintf("[term%v node%v Follower] AppendEntriesArgs %#v", rf.currentTerm, rf.me, args)
+	rf.dlog("[Follower][AppendEntries] AppendEntriesArgs %#v", args)
 
 	// Check stale request
 	if args.Term < rf.currentTerm {
@@ -549,7 +549,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				for i:=0; i<lastLogIndex-args.PrevLogIndex; i++ {
 					if args.Entries[i].Term != rf.lookupEntryByIndex(args.Entries[i].Index).Term {
 						reply.Success = false
-						DPrintf("[term%v node%v Follower] faulty leader %v send AppendEntries with same index but different content", rf.currentTerm, rf.me, args.LeaderId)
+						rf.dlog("[Follower][AppendEntries] faulty leader %v send AppendEntries with same index but different content", args.LeaderId)
 						return
 					}
 				}
@@ -566,7 +566,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// keep commitIndex latest with leader
 	if args.LeaderCommit > rf.commitIndex {
-		DPrintf("[term%v node%v Follower] learn commitIndex %v from leader", rf.currentTerm, rf.me, args.LeaderCommit)
+		rf.dlog("[Follower][AppendEntries] learn commitIndex %v from leader", args.LeaderCommit)
 		// but we must received the logs before we prepare to commit it
 		lastLogIndex := rf.getLastLogIndex()
 		if args.LeaderCommit < lastLogIndex {
@@ -574,7 +574,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.commitIndex = lastLogIndex
 		}
-		DPrintf("[term%v node%v Follower] update commitIndex to %v", rf.currentTerm, rf.me, rf.commitIndex)
+		rf.dlog("[Follower][AppendEntries] update commitIndex to %v", rf.commitIndex)
 		rf.applyEntries()
 	}
 }
@@ -595,9 +595,12 @@ func (rf *Raft) applyEntries() {
 	if rf.lastApplied < rf.snapshot.lastSnapshotIndex {
 		rf.lastApplied = rf.snapshot.lastSnapshotIndex
 	}
+	if rf.lastApplied < rf.commitIndex {
+		rf.dlog("[applyEntries] apply log (%v,%v]", rf.lastApplied,rf.commitIndex)
+	}
 	for rf.lastApplied < rf.commitIndex {
 		rf.lastApplied++
-		DPrintf("[node%v applyEntries] apply log %v", rf.me, rf.lastApplied)
+		rf.dlog("[applyEntries] apply log %v", rf.lastApplied)
 		entry := rf.lookupEntryByIndex(rf.lastApplied)
 		cmd := entry.Command
 		if cmd == nil {
@@ -627,9 +630,9 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.role != ROLE_LEADER {
-	index = -1
-	term = rf.currentTerm
-	isLeader = false
+		index = -1
+		term = rf.currentTerm
+		isLeader = false
 		return
 	}
 	index = rf.getLastLogIndex() + 1
@@ -644,7 +647,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	rf.persist()
 	rf.nextIndex[rf.me]= index + 1
 	rf.matchIndex[rf.me]= index
-	DPrintf("[term%v node%v Leader] append an new entry %v", rf.currentTerm, rf.me, entry)
+	rf.dlog("[Leader Proposal] append an new entry %v", entry)
 	return
 }
 
@@ -662,7 +665,7 @@ func (rf *Raft) Kill() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.persist()
-	DPrintf("node %v stop\n %#v", rf.me, rf)
+	rf.dlog("node stop\n %#v", rf)
 	close(rf.applyCh)
 }
 
@@ -694,7 +697,7 @@ func (rf *Raft) maybeStartElection() {
 		rf.votedFor = rf.me
 		rf.persist()
 
-		DPrintf("[term%v node%v Candidate] start an election", rf.currentTerm, rf.me)
+		rf.dlog("[Candidate] start an election")
 
 		voted := 1 // vote from self
 		for i := range rf.peers {
@@ -741,15 +744,15 @@ func (rf *Raft) requestVoteFromPeer(peerIndex int, args *RequestVoteArgs, voted 
 
 	// count the votes
 	if reply.VoteGranted {
-		DPrintf("[term%v node%v Candidate] got peer %v 's vote", rf.currentTerm, rf.me, peerIndex)
+		rf.dlog("[Candidate] got peer %v 's vote", peerIndex)
 		*voted++
 	} else {
-		DPrintf("[term%v node%v Candidate] refused by peer %v", rf.currentTerm, rf.me, peerIndex)
+		rf.dlog("[Candidate] vote refused by peer %v", peerIndex)
 	}
 
-	DPrintf("[term%v node%v Candidate] collect %v vote(s)", rf.currentTerm, rf.me, *voted)
+	rf.dlog("[Candidate] collect %v vote(s)", *voted)
 	if *voted >= rf.majarity && rf.role == ROLE_CANDIDATE {
-		DPrintf("[term%v node%v Candidate] win the election", rf.currentTerm, rf.me)
+		rf.dlog("[Candidate] win the election")
 		rf.role = ROLE_LEADER
 		rf.nextIndex = make([]int, len(rf.peers))
 		lastLogIndex := rf.getLastLogIndex()
@@ -789,7 +792,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
-	DPrintf("node %v start\n %#v", rf.me, rf)
+	rf.dlog("node start")
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
@@ -813,7 +816,7 @@ func (rf *Raft) replicationTicker(term int) {
 
 func (rf *Raft) leaderBumpCommit() {
 	// if rf.role != ROLE_LEADER || rf.currentTerm != term {
-	// 	DPrintf("[term%v node%v Leader Applier] Leader Applier stop", term, rf.me)
+	// 	rf.dlog("[Leader Applier] Leader Applier stop")
 	// 	return
 	// }
 
@@ -835,22 +838,22 @@ func (rf *Raft) leaderBumpCommit() {
 		}
 		if numReplica >= rf.majarity  {
 			rf.commitIndex = nextCommitIndex
-			DPrintf("[term%v node%v Leader Replication] set commitIndex to %v", rf.currentTerm, rf.me, rf.commitIndex)
+			rf.dlog("[Leader Replication] set commitIndex to %v", rf.commitIndex)
 		}
 	}
 	rf.applyEntries()
 }
 
 func (rf *Raft) startReplication(term int) bool {
-	DPrintf("[term%v node%v Leader Replication] startReplication", term, rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.dlog("[Leader Replication] startReplication")
 
 	if rf.role != ROLE_LEADER || rf.currentTerm != term {
 		if rf.role != ROLE_LEADER {
-			DPrintf("[term%v node%v Leader Replication] stop because no longer leader", term, rf.me)
+			rf.dlog("[Leader Replication] stop because no longer leader")
 		} else {
-			DPrintf("[term%v node%v Leader Replication] stop because new term %v", term, rf.me, rf.currentTerm)
+			rf.dlog("[Leader Replication] stop because new term. was leader in old term %v", term)
 		}
 		return false
 	}
@@ -879,17 +882,17 @@ func (rf *Raft) startReplication(term int) bool {
 	}
 	appendEntriesToPeer := func(peer int, args *AppendEntriesArgs, lastEntryIndex int) {
 		reply := &AppendEntriesReply{}
-		DPrintf("[term%v node%v Leader Replication] peer %v sendAppendEntries", args.Term, args.LeaderId, peer)
+		DPrintf("[term%v node%v Leader Replication][sendAppendEntries] send sendAppendEntries to peer %v", args.Term, args.LeaderId, peer)
 		ok := rf.sendAppendEntries(peer, args, reply)
 		if !ok {
-			DPrintf("[term%v node%v Leader Replication] peer %v sendAppendEntries failed", args.Term, args.LeaderId, peer)
+			DPrintf("[term%v node%v Leader Replication][sendAppendEntries] failed to send sendAppendEntries to %v", args.Term, args.LeaderId, peer)
 			return
 		}
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 
 		if rf.role != ROLE_LEADER || rf.currentTerm != args.Term {
-			DPrintf("[term%v node%v Leader Replication] peer %v stop", term, rf.me, peer)
+			rf.dlog("[Leader Replication][sendAppendEntries] send to peer %v stop", peer)
 			return
 		}
 
@@ -907,11 +910,11 @@ func (rf *Raft) startReplication(term int) bool {
 			if matchIndex > rf.matchIndex[peer] {
 				rf.matchIndex[peer] = matchIndex
 			}
-			DPrintf("[term%v node%v Leader Replication] peer %v AppendEntries Success num_entries:%v nextIndex:%v Entries:%#v LeaderCommit:%v", term, rf.me, peer, len(args.Entries), rf.nextIndex[peer], args.Entries, args.LeaderCommit)
+			rf.dlog("[Leader Replication][sendAppendEntries] peer %v AppendEntries Success num_entries:%v nextIndex:%v Entries:%#v LeaderCommit:%v", peer, len(args.Entries), rf.nextIndex[peer], args.Entries, args.LeaderCommit)
 		} else {
 			if rf.nextIndex[peer] == 1 {
 				// impossible. faulty peer since log 0(empty sentinel) must be consistent
-				DPrintf("[term%v node%v Leader Replication] faulty peer %v inconsistent with sentinel log entry.", term, rf.me, peer)
+				rf.dlog("[Leader Replication][sendAppendEntries] faulty peer %v inconsistent with sentinel log entry.", peer)
 				return // give up to replicate to this peer
 			}
 
@@ -924,7 +927,7 @@ func (rf *Raft) startReplication(term int) bool {
 					lastLogIndex := rf.getLastLogIndex()
 					if reply.XIndex > lastLogIndex {
 						// impossible. faulty peer since reply.XIndex <= args.PrevLogIndex <= lastLogIndex
-						DPrintf("[term%v node%v Leader Replication] faulty peer %v reply XIndex > lastLogIndex.", term, rf.me, peer)
+						rf.dlog("[Leader Replication][sendAppendEntries] faulty peer %v reply XIndex > lastLogIndex.",peer)
 						return // give up to replicate to this peer
 					}
 					// the conflicting term maybe partially valid (commited)
@@ -950,7 +953,7 @@ func (rf *Raft) startReplication(term int) bool {
 			} else {
 				rf.nextIndex[peer]--
 			}
-			DPrintf("[term%v node%v Leader Replication] peer %v nextIndex updated %v", term, rf.me, peer, rf.nextIndex)
+			rf.dlog("[Leader Replication][sendAppendEntries] peer %v nextIndex updated %v", peer, rf.nextIndex)
 		}
 	}
 
@@ -980,12 +983,11 @@ func (rf *Raft) startReplication(term int) bool {
 			entriesCopy := make([]Entry, len(entries)) // avoiding data-race, we will unlock during the request
 			copy(entriesCopy, entries)
 			// sanity check for entries
-			DPrintf("[term%v node%v Leader Replication] nextIndex%v lastLogIndex%v", term, rf.me, nextIndex, lastLogIndex)
-			DPrintf("[term%v node%v Leader Replication] log%#v", term, rf.me, rf.log)
-			DPrintf("[term%v node%v Leader Replication] snapshot%#v", term, rf.me, rf.snapshot)
+			rf.dlog("[Leader Replication][sendAppendEntries] log%#v", rf.log)
+			rf.dlog("[Leader Replication][sendAppendEntries] snapshot%#v", rf.snapshot)
 			if len(entriesCopy) > 0  {
 				for i, e := range entriesCopy {
-					DPrintf("[term%v node%v Leader Replication] entries[%v]: %v", term, rf.me, i, e)
+					rf.dlog("[Leader Replication][sendAppendEntries] entries[%v]: %v", i, e)
 					if entriesCopy[i].Index != nextIndex+i {
 						panic("entry's index is incorrect")
 					}
@@ -1006,4 +1008,17 @@ func (rf *Raft) startReplication(term int) bool {
 		}
 	}
 	return true
+}
+
+
+func (rf *Raft) dlog(format string, a ...interface{}) {
+	args := []any{
+		rf.currentTerm,
+		rf.me,
+		rf.getLastLogIndex(),
+		rf.commitIndex,
+		rf.lastApplied,
+	}
+	args = append(args, a...)
+	DPrintf("[Raft term%v node%v lastLogIndex%v commitIndex%v lastApplied%v] " + format, args...)
 }
