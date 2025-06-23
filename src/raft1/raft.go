@@ -866,8 +866,14 @@ func (rf *Raft) startReplication(term int) bool {
 				rf.intoFollower(reply.Term)
 				return ok // stop since no longer leader
 			}
-			rf.nextIndex[peer] = args.LastIncludedIndex + 1
-			rf.matchIndex[peer] = args.LastIncludedIndex
+			nextIndex := args.LastIncludedIndex + 1
+			matchIndex := args.LastIncludedIndex
+			if nextIndex > rf.nextIndex[peer] {
+				rf.nextIndex[peer] = nextIndex
+			}
+			if matchIndex > rf.matchIndex[peer] {
+				rf.matchIndex[peer] = matchIndex
+			}
 		}
 		return ok
 	}
@@ -893,9 +899,15 @@ func (rf *Raft) startReplication(term int) bool {
 			return // stop since no longer leader
 		}
 		if reply.Success {
-			rf.nextIndex[peer] = lastEntryIndex + 1
-			rf.matchIndex[peer] = lastEntryIndex
-			DPrintf("[term%v node%v Leader Replication] peer %v AppendEntries Success num_entries:%v nextIndex:%v Entries:%#v", term, rf.me, peer, len(args.Entries), rf.nextIndex[peer], args.Entries)
+			nextIndex := lastEntryIndex + 1
+			matchIndex := lastEntryIndex
+			if nextIndex > rf.nextIndex[peer] {
+				rf.nextIndex[peer] = nextIndex
+			}
+			if matchIndex > rf.matchIndex[peer] {
+				rf.matchIndex[peer] = matchIndex
+			}
+			DPrintf("[term%v node%v Leader Replication] peer %v AppendEntries Success num_entries:%v nextIndex:%v Entries:%#v LeaderCommit:%v", term, rf.me, peer, len(args.Entries), rf.nextIndex[peer], args.Entries, args.LeaderCommit)
 		} else {
 			if rf.nextIndex[peer] == 1 {
 				// impossible. faulty peer since log 0(empty sentinel) must be consistent
