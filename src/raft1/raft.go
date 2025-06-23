@@ -983,11 +983,10 @@ func (rf *Raft) startReplication(term int) bool {
 			entriesCopy := make([]Entry, len(entries)) // avoiding data-race, we will unlock during the request
 			copy(entriesCopy, entries)
 			// sanity check for entries
-			rf.dlog("[Leader Replication][sendAppendEntries] log%#v", rf.log)
-			rf.dlog("[Leader Replication][sendAppendEntries] snapshot%#v", rf.snapshot)
+			rf.dlog("[Leader Replication][sendAppendEntries] send to %v. \n log%#v \n snapshot%#v", peerIdx, rf.log, rf.snapshot)
 			if len(entriesCopy) > 0  {
 				for i, e := range entriesCopy {
-					rf.dlog("[Leader Replication][sendAppendEntries] entries[%v]: %v", i, e)
+					rf.dlog("[Leader Replication][sendAppendEntries] send to %v entries[%v]: %v", peerIdx, i, e)
 					if entriesCopy[i].Index != nextIndex+i {
 						panic("entry's index is incorrect")
 					}
