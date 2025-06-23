@@ -1,7 +1,9 @@
 package rsm
 
 import (
+	"time"
 	"sync"
+	"sync/atomic"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
@@ -15,11 +17,16 @@ var useRaftStateMachine bool // to plug in another raft besided raft1
 
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Submitter int
+	ReqId     int
+	Req       any
 }
 
+type OpResult struct {
+	Submitter  int
+	ReqId      int
+	Result     any
+}
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
@@ -40,7 +47,9 @@ type RSM struct {
 	applyCh      chan raftapi.ApplyMsg
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
-	// Your definitions here.
+
+	resultCh     map[int]chan OpResult // pass the result on sm from reader to Submit(). index is the requst id
+	closed       atomic.Bool
 }
 
 // servers[] contains the ports of the set of
@@ -64,10 +73,12 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		resultCh:     make(map[int]chan OpResult),
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+	go rsm.reader()
 	return rsm
 }
 
@@ -80,11 +91,82 @@ func (rsm *RSM) Raft() raftapi.Raft {
 // should return ErrWrongLeader if client should find new leader and
 // try again.
 func (rsm *RSM) Submit(req any) (rpc.Err, any) {
+	rsm.mu.Lock()
+	defer rsm.mu.Unlock()
+	reqId := int(time.Now().UnixNano())
+	op := Op{Submitter: rsm.me, ReqId: reqId, Req: req}
+	rsm.resultCh[reqId] = make(chan OpResult, 1)
 
-	// Submit creates an Op structure to run a command through Raft;
-	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
-	// is the argument to Submit and id is a unique id for the op.
+	// submit to raft
+	rsm.dlog("Start %#v", op)
+	index, startTerm, ok := rsm.rf.Start(op)
+	if !ok {
+		rsm.dlog("submit fail because it's not the leader")
+		return rpc.ErrWrongLeader, nil // i'm not leader, try another server.
+	}
+	rsm.dlog("submit in the node index %d term %d", index, startTerm)
 
-	// your code here
-	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	// make sure reqId unique for next submit
+	for int(time.Now().UnixNano()) == reqId {
+		time.Sleep(1 * time.Nanosecond)
+	}
+
+	// checking our request is commited in raft...
+	for {
+		select {
+			case opResult := <- rsm.resultCh[reqId] :
+				result := opResult.Result
+				rsm.dlog("receive apply op %#v result %#v", op, result)
+
+				close(rsm.resultCh[reqId])
+				rsm.resultCh[reqId] = nil
+				return rpc.OK, result
+			default:
+				// our request maybe lost because fail of agreement
+				currentTerm, isLeader := rsm.rf.GetState()
+				if !isLeader || currentTerm != startTerm {
+					return rpc.ErrWrongLeader, nil // i'm not leader, try another server.
+				}
+
+				if rsm.closed.Load() {
+					return rpc.ErrMaybe, nil // i'm dead, the result is unkonwn
+				}
+		}
+	}
+}
+
+func (rsm *RSM) reader() {
+	for msg := range rsm.applyCh {
+		if msg.CommandValid {
+			op := msg.Command.(Op)
+			rsm.dlog("apply op %#v", op)
+			result := rsm.sm.DoOp(op.Req)
+			opResult := OpResult{
+				Submitter: op.Submitter,
+				ReqId:     op.ReqId,
+				Result:    result,
+			}
+			rsm.dlog("apply op result %#v", result)
+			// if submmiter is other server, our client is not wating for it...
+			if op.Submitter == rsm.me {
+				// if the request is a duplicated apply(due to crash or restart), resultCh is nil, no consumer
+				// and we should ignore it, otherwise we will deadlock for waiting on nil
+				if rsm.resultCh[op.ReqId] != nil {
+					rsm.resultCh[op.ReqId] <- opResult
+				}
+			}
+		} else if msg.SnapshotValid {
+			panic("snapshot unsupported")
+		}
+	}
+	rsm.closed.Store(true)
+}
+
+
+func (rsm *RSM) dlog(format string, a ...interface{}) {
+	args := []any{
+		rsm.me,
+	}
+	args = append(args, a...)
+	DPrintf("[rsm %v] " + format, args...)
 }
