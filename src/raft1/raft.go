@@ -585,7 +585,13 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 // apply all commited but not applied to state machine
+// locked need
 func (rf *Raft) applyEntries() {
+	// check not killed otherwise we maybe panic when sending to applyCh
+	// Safety: we're holding lock to prevent change killed state or applyCh from others
+	if rf.killed() {
+		return
+	}
 	if rf.lastApplied < rf.snapshot.lastSnapshotIndex {
 		rf.lastApplied = rf.snapshot.lastSnapshotIndex
 	}
@@ -657,6 +663,7 @@ func (rf *Raft) Kill() {
 	defer rf.mu.Unlock()
 	rf.persist()
 	DPrintf("node %v stop\n %#v", rf.me, rf)
+	close(rf.applyCh)
 }
 
 func (rf *Raft) killed() bool {
