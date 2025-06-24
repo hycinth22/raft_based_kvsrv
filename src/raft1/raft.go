@@ -637,8 +637,17 @@ func (rf *Raft) applySnapshotOrEntries() {
 		}
 		rf.lastApplied = rf.snapshot.lastSnapshotIndex
 	}
-	rf.dlog("[applyEntries] apply log (%v,%v]", rf.lastApplied,rf.commitIndex)
-	for rf.lastApplied < rf.commitIndex {
+
+	// the node's commitIndex does not mean we have received all entries that index <= commitIndex
+	// maybe the node is minority which has not received that
+	lastShouldApplied := rf.commitIndex
+	lastLogIndex := rf.getLastLogIndex()
+	if lastShouldApplied > lastLogIndex {
+		lastShouldApplied = lastLogIndex
+	}
+
+	rf.dlog("[applyEntries] apply log (%v,%v]", rf.lastApplied, lastShouldApplied)
+	for rf.lastApplied < lastShouldApplied {
 		rf.lastApplied++
 		rf.dlog("[applyEntries] apply log %v", rf.lastApplied)
 		entry := rf.lookupEntryByIndex(rf.lastApplied)
