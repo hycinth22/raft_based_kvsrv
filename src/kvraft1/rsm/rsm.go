@@ -261,7 +261,6 @@ func (rsm *RSM) reader() {
 func (rsm *RSM) dlog(format string, a ...interface{}) {
 	args := []any{
 		rsm.me,
-		-1,
 		rsm.waitingApplyReq.Load(),
 		rsm.appliedOpIndex.Load(),
 	}
