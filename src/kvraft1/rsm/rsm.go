@@ -5,13 +5,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"runtime"
+	"bytes"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
 	"6.5840/raft1"
 	"6.5840/raftapi"
 	"6.5840/tester1"
-
+	"6.5840/labgob"
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
@@ -53,7 +54,7 @@ type RSM struct {
 	waitingOpReqId chan int
 
 	waitingApplyReq atomic.Int64  // only for dlog  now
-	appliedOpIndex atomic.Int64  //  only for dlog and sanity checking now
+	appliedOpIndex  atomic.Int64  // only for dlog and sanity checking now
 
 	applyResult    sync.Map      // map[int]chan OpResult
 
@@ -83,10 +84,14 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		sm:           sm,
 	}
 	rsm.waitingOpReqId = make(chan int, 1024)
-	// rsm.applyResult = make(map[int]chan OpResult, 1024)
+	snapshot := persister.ReadSnapshot()
+	if snapshot != nil && len(snapshot) > 0 {
+		rsm.readSnapshot(snapshot)
+	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+	rsm.dlog("start up")
 	go rsm.reader()
 	return rsm
 }
@@ -123,9 +128,6 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 		rsm.dlog("[op %v %v] Submit waitingOpIndex %v", index, op, index)
 
 		rsm.applyResult.Store(index, make(chan OpResult, 1))
-		// rsm.applyResultMu.Lock()
-		// rsm.applyResult[index] = make(chan OpResult, 1)
-		// rsm.applyResultMu.Unlock()
 
 		// make sure reqId unique for next submit
 		for int(time.Now().UnixNano()) == reqId {
@@ -164,9 +166,6 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 		rsm.dlog("[op %v %v] Submit ready to produce result", index, op)
 
 		rsm.applyResult.Delete(index)
-		// rsm.applyResultMu.Lock()
-		// delete(rsm.applyResult, index)
-		// rsm.applyResultMu.Unlock()
 
 		if opResult == nil {
 			return rpc.ErrWrongLeader, nil  // i'm dead
@@ -215,13 +214,14 @@ func (rsm *RSM) reader() {
 				rsm.dlog("receive apply msg %#v", msg)
 				index := msg.CommandIndex
 
-				rsm.appliedOpIndex.Add(1)
-				if rsm.appliedOpIndex.Load() != int64(index) {
+				appliedOpIndex := rsm.appliedOpIndex.Add(1)
+				if appliedOpIndex != int64(index) {
+					rsm.dlog("wrong command index %v. something preceding not applied appliedOpIndex %v", index, appliedOpIndex)
 					panic("wrong command index. something preceding not applied")
 				}
 
 				op := msg.Command.(Op)
-				rsm.dlog("apply op %#v", op)
+				rsm.dlog("apply op %v %#v", index, op)
 				result := rsm.sm.DoOp(op.Req)
 				opResult := OpResult{
 					Submitter: op.Submitter,
@@ -248,15 +248,82 @@ func (rsm *RSM) reader() {
 					applyResultCh.(chan OpResult) <- opResult
 					rsm.dlog("sent apply op %v result %#v %p", index, result, rsm)
 				}
-			}()
 
+				rsm.snapshotIfNeed(index)
+			}()
 		} else if msg.SnapshotValid {
-			panic("snapshot unsupported")
+			rsm.dlog("receive apply msg %#v", msg)
+			rsm.readSnapshot(msg.Snapshot)
+			applied := rsm.appliedOpIndex.Load()
+			for applied < int64(msg.SnapshotIndex) {
+				// update
+				ok := rsm.appliedOpIndex.CompareAndSwap(applied, int64(msg.SnapshotIndex))
+				if ok {
+					break
+				}
+			}
 		}
 	}
 	rsm.closed.Store(true)
 }
 
+
+type snapshot struct {
+	StateMachineSnapshot []byte
+	AppliedOpIndex       int64
+}
+
+func init() {
+	labgob.Register(snapshot{})
+}
+
+func (rsm *RSM) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var snapshot snapshot
+	if d.Decode(&snapshot) != nil {
+		return
+	}
+
+	if snapshot.StateMachineSnapshot != nil && len(snapshot.StateMachineSnapshot) > 0 {
+		rsm.sm.Restore(snapshot.StateMachineSnapshot) // notify application-layer to restore
+	}
+
+	applied := rsm.appliedOpIndex.Load()
+	for applied < int64(snapshot.AppliedOpIndex) {
+		// update
+		ok := rsm.appliedOpIndex.CompareAndSwap(applied, int64(snapshot.AppliedOpIndex))
+		if ok {
+			break
+		}
+	}
+}
+
+func (rsm *RSM) generateSnapshot() []byte {
+	smSnapshot := rsm.sm.Snapshot() // request application-layer snapshot
+
+	// append rsm snapshot metadata
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	snapshot := snapshot{
+		StateMachineSnapshot: smSnapshot,
+		AppliedOpIndex:       rsm.appliedOpIndex.Load(),
+	}
+	e.Encode(snapshot)
+	return w.Bytes()
+}
+
+func (rsm *RSM) snapshotIfNeed(index int) {
+	// snapshot if rf.PersistBytes() > maxraftstate
+	if rsm.maxraftstate != -1 && rsm.rf.PersistBytes() > rsm.maxraftstate {
+		snapshot := rsm.generateSnapshot()
+		rsm.rf.Snapshot(index, snapshot) // notify underlying-layer
+	}
+}
 
 func (rsm *RSM) dlog(format string, a ...interface{}) {
 	args := []any{

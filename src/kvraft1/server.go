@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"strings"
 	"fmt"
+	"bytes"
 
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
@@ -31,9 +32,9 @@ type Key = string
 type Value = string
 
 type Entry struct {
-	key     Key
-	value   Value
-	version rpc.Tversion // 0 for non-exist. 1 is least valid version
+	Key     Key
+	Value   Value
+	Version rpc.Tversion // 0 for non-exist. 1 is least valid version
 }
 
 type GetOp struct {
@@ -45,11 +46,15 @@ type PutOp struct {
 }
 
 func init() {
+	// rpc including raft types
 	labgob.Register(GetOp{})
 	labgob.Register(PutOp{})
 	labgob.Register(rsm.Op{})
 	labgob.Register(rpc.PutArgs{})
 	labgob.Register(rpc.GetArgs{})
+	// snapshot types
+	labgob.Register(snapshot{})
+	labgob.Register(Entry{})
 }
 
 func (kv *KVServer) DoOp(req any) any {
@@ -71,8 +76,8 @@ func (kv *KVServer) doGet(op GetOp) (reply rpc.GetReply) {
 		reply.Err = rpc.ErrNoKey
 		return
 	}
-	reply.Value = entry.value
-	reply.Version = entry.version
+	reply.Value = entry.Value
+	reply.Version = entry.Version
 	reply.Err = rpc.OK
 	return
 }
@@ -85,13 +90,13 @@ func (kv *KVServer) doPut(op PutOp) (reply rpc.PutReply) {
 	entry, exist := kv.data[args.Key]
 	if exist {
 		// existing key path
-		if args.Version != rpc.Tversion(entry.version) {
+		if args.Version != rpc.Tversion(entry.Version) {
 			reply.Err = rpc.ErrVersion
 			return
 		}
 		// update existing key
-		entry.value = args.Value
-		entry.version++
+		entry.Value = args.Value
+		entry.Version++
 		reply.Err = rpc.OK
 		return
 	} else {
@@ -102,20 +107,46 @@ func (kv *KVServer) doPut(op PutOp) (reply rpc.PutReply) {
 		}
 		// create new key
 		entry := new(Entry)
-		entry.key = args.Key
-		entry.value = args.Value
-		entry.version = 1
-		kv.data[entry.key] = entry
+		entry.Key = args.Key
+		entry.Value = args.Value
+		entry.Version = 1
+		kv.data[entry.Key] = entry
 		reply.Err = rpc.OK
 		return
 	}
 }
 
+
+type snapshot struct {
+	Data map[Key]*Entry
+}
+
 func (kv *KVServer) Snapshot() []byte {
-	return nil
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	snapshot := snapshot{
+		Data: kv.data,
+	}
+	e.Encode(snapshot)
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var snapshot snapshot
+	if d.Decode(&snapshot) != nil {
+		return
+	}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.data = snapshot.Data
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
