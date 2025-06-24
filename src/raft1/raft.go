@@ -168,7 +168,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		if index <= rf.snapshot.lastSnapshotIndex {
-			return
+			return // maybe duplicated snapshot notification
+		}
+		if index > rf.getLastLogIndex() {
+			panic("Snapshot with future index")
 		}
 		if index > rf.commitIndex {
 			panic("client snapshot include uncommited entry")
@@ -242,6 +245,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.dlog("[Follower][InstallSnapshot] snapshot %#v", rf.snapshot)
 	rf.dlog("[Follower][InstallSnapshot] log %#v", rf.log)
 
+	if args.LastIncludedIndex <= rf.snapshot.lastSnapshotIndex {
+		rf.dlog("[Follower][InstallSnapshot] receive stale or duplicated snapshot. discard", rf.log)
+		return
+	}
 	// new index log inclued or inconsistent with leader snapsoht
 	if args.LastIncludedIndex >= rf.getLastLogIndex() || rf.lookupEntryByIndex(args.LastIncludedIndex).Term != args.LastIncludedTerm {
 		// all should be purged
@@ -363,6 +370,19 @@ func (rf *Raft) getLastLogIndexAndTerm() (index int, term int) {
 	return
 }
 
+func (rf *Raft) entryNotCleaned(index int) bool {
+	return index > rf.snapshot.lastSnapshotIndex
+}
+
+func (rf *Raft) entrySubmited(index int) bool {
+	return index <= rf.getLastLogIndex()
+}
+
+func (rf *Raft) entryExist(index int) bool {
+	return rf.entryNotCleaned(index) && rf.entrySubmited(index)
+}
+
+// safty: index>=rf.snapshot.lastSnapshotIndex
 func (rf *Raft) lookupEntryByIndex(index int) *Entry {
 	if index == rf.snapshot.lastSnapshotIndex {
 		// included in snapshot already, but maybe need it's term...
@@ -387,6 +407,7 @@ func (rf *Raft) lookupEntriesByIndex(beginIndex int, endIndex int) []Entry {
 
 func (rf *Raft) lookupEntryPosByIndex(index int) (pos int) {
 	if index <= rf.snapshot.lastSnapshotIndex {
+		rf.dlog("[lookupEntryPosByIndex %v] entry cleaned", index)
 		panic("entry cleaned")
 	}
 	pos = index - (rf.snapshot.lastSnapshotIndex + 1)
@@ -494,7 +515,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTimeout = electionTimeoutMin + time.Duration(rand.Int63()%randRange)
 
 	lastLogIndex := rf.getLastLogIndex()
-
 	// Consistency check: Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	//
 	// During normal operation, the logs of the leader and followers stay consistent, so the AppendEntries consistency check never fails.
@@ -506,8 +526,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if OPT_BACK_UP_INCONSITENT_IN_TERM {
 			reply.XTerm = -1
 			reply.XIndex = -1
-			reply.XNextIndex = lastLogIndex+1 // tell leader to sync from here
+			reply.XNextIndex = lastLogIndex+1 // tell leader to sync from here, regress
 		}
+		rf.dlog("[Follower][AppendEntries] Consistency check fail on PrevLogIndex. reply %v", reply)
+		return
+	}
+	if args.PrevLogIndex < rf.snapshot.lastSnapshotIndex {
+		reply.Success = false
+		reply.XIndex = -1
+		reply.XNextIndex = rf.snapshot.lastSnapshotIndex+1 // tell leader to sync from here, advance
+		rf.dlog("[Follower][AppendEntries] Receieve stale or duplicated AppendEntries whose PrevLogIndex has been snapshoted. reply %#v", reply)
 		return
 	}
 	if rf.lookupEntryByIndex(args.PrevLogIndex).Term != args.PrevLogTerm { // preceding entry whose term is conflicting, extra entries that are not present on the leader
@@ -523,22 +551,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				}
 				xindex--
 			}
+			// tell leader to check entries from xindex whether has consistent xterm
 			reply.XTerm = xterm // conflicting term
 			reply.XIndex = xindex // index of first entry with that term 
 			reply.XNextIndex = -1 // useless now...
+		} else {
+			reply.XTerm = -1
+			reply.XIndex = -1
+			reply.XNextIndex = args.PrevLogIndex // tell leader to sync from here
 		}
 		return
 	}
 	reply.Success = true
 
-	nextIndex := args.PrevLogIndex+1
-	if nextIndex <= lastLogIndex {
+	firstIndex := args.PrevLogIndex+1
+	if firstIndex <= lastLogIndex {
 		// (partial) entries already exists in follower's log.
 		// Check confliciting entries with leader (If an existing entry conflicts with a new one (same index but different terms)
-		if rf.lookupEntryByIndex(nextIndex).Term != args.Term {
+		if rf.lookupEntryByIndex(firstIndex).Term != args.Term {
 			// It conflicts.
 			// Discard confliciting entries with leader: delete the existing entry and all that follow it
-			rf.discardEntriesFrom(nextIndex)
+			rf.discardEntriesFrom(firstIndex)
 		} else {
 			// (Maybe partial) duplicated AppendEntries from same leader...
 			// Check whether some entries can save
@@ -589,7 +622,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-// apply all commited but not applied to state machine
+// apply all commited log to state machine
 // locked need
 func (rf *Raft) applyEntries() {
 	// check not killed otherwise we maybe panic when sending to applyCh
@@ -607,6 +640,9 @@ func (rf *Raft) applyEntries() {
 		rf.lastApplied++
 		rf.dlog("[applyEntries] apply log %v", rf.lastApplied)
 		entry := rf.lookupEntryByIndex(rf.lastApplied)
+		if entry.Index != rf.lastApplied {
+			panic("entry.Index != rf.lastApplied")
+		}
 		cmd := entry.Command
 		if cmd == nil {
 			panic("cmd is nil")
@@ -946,7 +982,7 @@ func (rf *Raft) startReplication(term int, allowEmpty bool) bool {
 					lastLogIndex := rf.getLastLogIndex()
 					if reply.XIndex > lastLogIndex {
 						// impossible. faulty peer since reply.XIndex <= args.PrevLogIndex <= lastLogIndex
-						rf.dlog("[Leader Replication][sendAppendEntries] faulty peer %v reply XIndex > lastLogIndex.",peer)
+						rf.dlog("[Leader Replication][sendAppendEntries] faulty peer %v reply XIndex > lastLogIndex.", peer)
 						return // give up to replicate to this peer
 					}
 					// the conflicting term maybe partially valid (commited)
@@ -970,7 +1006,9 @@ func (rf *Raft) startReplication(term int, allowEmpty bool) bool {
 					}
 				}
 			} else {
-				rf.nextIndex[peer]--
+				// maybe advance since args.PrevLogIndex has been snapshot in follower
+				// maybe regress since args.PrevLogIndex dont exist in follower
+				rf.nextIndex[peer] = reply.XIndex
 			}
 			rf.dlog("[Leader Replication][sendAppendEntries] peer %v nextIndex updated %v", peer, rf.nextIndex)
 		}
@@ -1039,7 +1077,8 @@ func (rf *Raft) dlog(format string, a ...interface{}) {
 		rf.getLastLogIndex(),
 		rf.commitIndex,
 		rf.lastApplied,
+		rf.snapshot.lastSnapshotIndex,
 	}
 	args = append(args, a...)
-	DPrintf("[Raft term%v node%v lastLogIndex%v commitIndex%v lastApplied%v] " + format, args...)
+	DPrintf("[Raft term%v node%v lastLogIndex%v commitIndex%v lastApplied%v snapshotIndex%v] " + format, args...)
 }
