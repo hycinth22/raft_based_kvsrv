@@ -48,9 +48,9 @@ type Entry struct {
 }
 
 type Snapshot struct {
-	lastSnapshotIndex int    // included index in this snapshot
-	lastSnapshotTerm  int    // included term in this snapshot
-	data              []byte // snapshot. persisted
+	lastSnapshotIndex int    // included index in this snapshot. persisted
+	lastSnapshotTerm  int    // included term in this snapshot. persisted
+	data              []byte // application-layer snapshot. persisted
 }
 
 // A Go object implementing a single Raft peer.
@@ -188,9 +188,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			lastSnapshotTerm: entry.Term,
 		}
 		rf.persist()
-		if rf.lastApplied < index {
-			rf.lastApplied = index
-		}
+		rf.applySnapshotOrEntries()
 	}()
 }
 
@@ -264,18 +262,14 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		lastSnapshotTerm:  args.LastIncludedTerm,
 	}
 	rf.persist()
-	rf.applyCh <- raftapi.ApplyMsg{
-		SnapshotValid: true,
-		Snapshot:      args.Data,
-		SnapshotIndex: args.LastIncludedIndex,
-		SnapshotTerm:  args.LastIncludedTerm,
-	}
+	go func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		rf.applySnapshotOrEntries()
+	}()
 	// the entries has been applied and transmit via snapshot
 	if rf.commitIndex < args.LastIncludedIndex {
 		rf.commitIndex = args.LastIncludedIndex
-	}
-	if rf.lastApplied < args.LastIncludedIndex {
-		rf.lastApplied = args.LastIncludedIndex
 	}
 	// rf.nextIndex & rf.matchIndex is unnecessary because the node is follower instead of leader
 	// them will be reinitilized when becoming leader
@@ -607,12 +601,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.dlog("[Follower][AppendEntries] update commitIndex to %v", rf.commitIndex)
 
-		// applyEntries is unrelated to consesus, all entries should be applied has been commit in cluster, do by itself later
+		// applySnapshotOrEntries is unrelated to consesus, all entries should be applied has been commit in cluster, do by itself later
 		// this way will not slow down rpc response
 		go func() {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
-			rf.applyEntries()
+			rf.applySnapshotOrEntries()
 		}()
 	}
 }
@@ -624,18 +618,26 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 // apply all commited log to state machine
 // locked need
-func (rf *Raft) applyEntries() {
+func (rf *Raft) applySnapshotOrEntries() {
 	// check not killed otherwise we maybe panic when sending to applyCh
 	// Safety: we're holding lock to prevent change killed state or applyCh from others
-	if rf.killed() {
+	if rf.killed() || rf.lastApplied == rf.commitIndex {
 		return
 	}
+	if rf.lastApplied > rf.commitIndex {
+		panic("rf.lastApplied > rf.commitIndex. uncommited log applied?")
+	}
 	if rf.lastApplied < rf.snapshot.lastSnapshotIndex {
+		rf.dlog("[applySnapshot] apply snapshot index %v term %v", rf.snapshot.lastSnapshotIndex, rf.snapshot.lastSnapshotTerm)
+		rf.applyCh <- raftapi.ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      rf.snapshot.data,
+			SnapshotIndex: rf.snapshot.lastSnapshotIndex,
+			SnapshotTerm:  rf.snapshot.lastSnapshotTerm,
+		}
 		rf.lastApplied = rf.snapshot.lastSnapshotIndex
 	}
-	if rf.lastApplied < rf.commitIndex {
-		rf.dlog("[applyEntries] apply log (%v,%v]", rf.lastApplied,rf.commitIndex)
-	}
+	rf.dlog("[applyEntries] apply log (%v,%v]", rf.lastApplied,rf.commitIndex)
 	for rf.lastApplied < rf.commitIndex {
 		rf.lastApplied++
 		rf.dlog("[applyEntries] apply log %v", rf.lastApplied)
@@ -888,12 +890,12 @@ func (rf *Raft) leaderBumpCommit() {
 			rf.dlog("[Leader Replication] set commitIndex to %v", rf.commitIndex)
 		}
 	}
-	// applyEntries is unrelated to consesus, all entries should be applied has been commit in cluster, do by itself later
+	// applySnapshotOrEntries is unrelated to consesus, all entries should be applied has been commit in cluster, do by itself later
 	// this way will not slow down appendEntriesToPeer
 	go func() {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		rf.applyEntries()
+		rf.applySnapshotOrEntries()
 	}()
 }
 
