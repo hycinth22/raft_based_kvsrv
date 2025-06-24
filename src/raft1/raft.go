@@ -30,10 +30,11 @@ const (
 // replicateInterval <<< electionTimeoutMin < electionTimeoutMax
 // requestRetryInterval < electionTimeoutMin/2
 const (
-	electionTimeoutMin time.Duration = 160 * time.Millisecond
+	electionTimeoutMin time.Duration = 180 * time.Millisecond // ~= 3 * heartbeatInterval + extra
 	electionTimeoutMax time.Duration = 600 * time.Millisecond
 
-	replicateInterval time.Duration = 50 * time.Millisecond
+	heartbeatInterval time.Duration = 50 * time.Millisecond // interval for empty AppendEntries
+	replicateInterval time.Duration = 10 * time.Millisecond // interval for non-empty AppendEntries
 	initialLogQueueCapacity int = 1024
 
 	OPT_BACK_UP_INCONSITENT_IN_TERM bool = true
@@ -389,7 +390,6 @@ func (rf *Raft) lookupEntryPosByIndex(index int) (pos int) {
 		panic("entry cleaned")
 	}
 	pos = index - (rf.snapshot.lastSnapshotIndex + 1)
-	rf.dlog("[lookupEntryPosByIndex] %v %v", index, pos)
 	return
 }
 
@@ -679,7 +679,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) ticker() {
+func (rf *Raft) electionTicker() {
 	for rf.killed() == false {
 		rf.maybeStartElection()
 
@@ -765,7 +765,7 @@ func (rf *Raft) requestVoteFromPeer(peerIndex int, args *RequestVoteArgs, voted 
 			rf.nextIndex[i] = lastLogIndex + 1
 		}
 		rf.matchIndex = make([]int, len(rf.peers))
-		go rf.replicationTicker(args.Term)
+		go rf.leaderTicker(args.Term)
 	}
 }
 
@@ -800,22 +800,28 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.dlog("node start")
 
 	// start ticker goroutine to start elections
-	go rf.ticker()
+	go rf.electionTicker()
 
 	return rf
 }
 
 // could only replicate in the given term
-func (rf *Raft) replicationTicker(term int) {
-	DPrintf("[term%v node%v Leader Replication] start replicationTicker", term, rf.me)
+func (rf *Raft) leaderTicker(term int) {
+	DPrintf("[term%v node%v Leader Ticker] start leaderTicker", term, rf.me)
+	heartbeatTicker := time.Tick(heartbeatInterval)
+	replicateTicker := time.Tick(replicateInterval)
 	for rf.killed() == false {
-		ok := rf.startReplication(term)
-		if !ok {
-			DPrintf("[term%v node%v Leader Replication] stop replicationTicker", term, rf.me)
+		var stillLeader bool
+		select {
+		case <-heartbeatTicker:
+			stillLeader = rf.startReplication(term, true)
+		case <-replicateTicker:
+			stillLeader = rf.startReplication(term, false)
+		}
+		if !stillLeader {
+			DPrintf("[term%v node%v Leader Ticker] stop leaderTicker", term, rf.me)
 			break
 		}
-
-		time.Sleep(replicateInterval)
 	}
 }
 
@@ -855,9 +861,10 @@ func (rf *Raft) leaderBumpCommit() {
 	}()
 }
 
-func (rf *Raft) startReplication(term int) bool {
+func (rf *Raft) startReplication(term int, allowEmpty bool) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	rf.dlog("[Leader Replication] startReplication")
 
 	if rf.role != ROLE_LEADER || rf.currentTerm != term {
@@ -868,6 +875,7 @@ func (rf *Raft) startReplication(term int) bool {
 		}
 		return false
 	}
+	rf.leaderBumpCommit()
 
 	installSnapShotToPeer := func(peer int, args *InstallSnapshotArgs) bool {
 		reply := &InstallSnapshotReply{}
@@ -968,7 +976,6 @@ func (rf *Raft) startReplication(term int) bool {
 		}
 	}
 
-	rf.leaderBumpCommit()
 	for peerIdx := range rf.peers {
 		if peerIdx == rf.me {
 			continue
@@ -991,6 +998,10 @@ func (rf *Raft) startReplication(term int) bool {
 			prevLogIndex := nextIndex-1
 			prevLogTerm := rf.lookupEntryByIndex(nextIndex-1).Term
 			entries := rf.lookupEntriesByIndex(nextIndex, lastLogIndex)
+
+			if !allowEmpty && len(entries)==0 {
+				continue
+			}
 			entriesCopy := make([]Entry, len(entries)) // avoiding data-race, we will unlock during the request
 			copy(entriesCopy, entries)
 			// sanity check for entries
