@@ -98,6 +98,7 @@ func (rsm *RSM) Raft() raftapi.Raft {
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
 // try again.
+// ErrWrongLeader if no longer Leader
 func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	var op Op
 
@@ -157,8 +158,6 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 		case applyResult := <- applyResultCh.(chan OpResult):
 			opResult = &applyResult
 		case <- noLongerLeader:
-			return rpc.ErrMaybe, nil
-		case <- time.After(2000 * time.Millisecond) :
 			return rpc.ErrWrongLeader, nil
 		}
 
