@@ -1,7 +1,10 @@
 package kvraft
 
 import (
+	"sync"
 	"sync/atomic"
+	"strings"
+	"fmt"
 
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
@@ -11,43 +14,136 @@ import (
 
 )
 
+const (
+	KVInitialCapacity int = 1024
+)
+
 type KVServer struct {
 	me   int
 	dead int32 // set by Kill()
 	rsm  *rsm.RSM
 
-	// Your definitions here.
+	mu   sync.Mutex
+	data map[Key]*Entry
 }
 
-// To type-cast req to the right type, take a look at Go's type switches or type
-// assertions below:
-//
-// https://go.dev/tour/methods/16
-// https://go.dev/tour/methods/15
+type Key = string
+type Value = string
+
+type Entry struct {
+	key     Key
+	value   Value
+	version rpc.Tversion // 0 for non-exist. 1 is least valid version
+}
+
+type GetOp struct {
+	Args *rpc.GetArgs
+}
+
+type PutOp struct {
+	Args *rpc.PutArgs
+}
+
+func init() {
+	labgob.Register(GetOp{})
+	labgob.Register(PutOp{})
+	labgob.Register(rsm.Op{})
+	labgob.Register(rpc.PutArgs{})
+	labgob.Register(rpc.GetArgs{})
+}
+
 func (kv *KVServer) DoOp(req any) any {
-	// Your code here
+	if op, ok := req.(GetOp); ok {
+		return kv.doGet(op)
+	} else if op, ok := req.(PutOp); ok {
+		return kv.doPut(op)
+	}
 	return nil
 }
 
+func (kv *KVServer) doGet(op GetOp) (reply rpc.GetReply) {
+	kv.dlog("[DoGet] %#v", op.Args)
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	args := op.Args
+	entry, exist := kv.data[args.Key]
+	if !exist {
+		reply.Err = rpc.ErrNoKey
+		return
+	}
+	reply.Value = entry.value
+	reply.Version = entry.version
+	reply.Err = rpc.OK
+	return
+}
+
+func (kv *KVServer) doPut(op PutOp) (reply rpc.PutReply) {
+	kv.dlog("[DoPut] Put %#v", op.Args)
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	args := op.Args
+	entry, exist := kv.data[args.Key]
+	if exist {
+		// existing key path
+		if args.Version != rpc.Tversion(entry.version) {
+			reply.Err = rpc.ErrVersion
+			return
+		}
+		// update existing key
+		entry.value = args.Value
+		entry.version++
+		reply.Err = rpc.OK
+		return
+	} else {
+		// new key path
+		if args.Version > 0 {
+			reply.Err = rpc.ErrNoKey
+			return
+		}
+		// create new key
+		entry := new(Entry)
+		entry.key = args.Key
+		entry.value = args.Value
+		entry.version = 1
+		kv.data[entry.key] = entry
+		reply.Err = rpc.OK
+		return
+	}
+}
+
 func (kv *KVServer) Snapshot() []byte {
-	// Your code here
 	return nil
 }
 
 func (kv *KVServer) Restore(data []byte) {
-	// Your code here
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
-	// Your code here. Use kv.rsm.Submit() to submit args
-	// You can use go's type casts to turn the any return value
-	// of Submit() into a GetReply: rep.(rpc.GetReply)
+	op := GetOp{
+		args,
+	}
+	kv.dlog("[Get] submit %#v", op.Args)
+	err, doResult := kv.rsm.Submit(op)
+	kv.dlog("[Get] doResult err %v doResult %#v", err, doResult)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	*reply = doResult.(rpc.GetReply)
 }
 
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
-	// Your code here. Use kv.rsm.Submit() to submit args
-	// You can use go's type casts to turn the any return value
-	// of Submit() into a PutReply: rep.(rpc.PutReply)
+	op := PutOp{
+		args,
+	}
+	kv.dlog("[Put] submit %#v", op.Args)
+	err, doResult := kv.rsm.Submit(op)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	kv.dlog("[Put] doResult err %v doResult %#v", err, doResult)
+	*reply = doResult.(rpc.PutReply)
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -60,7 +156,6 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 // to suppress debug output from a Kill()ed instance.
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
-	// Your code here, if desired.
 }
 
 func (kv *KVServer) killed() bool {
@@ -71,16 +166,28 @@ func (kv *KVServer) killed() bool {
 // StartKVServer() and MakeRSM() must return quickly, so they should
 // start goroutines for any long-running work.
 func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persister *tester.Persister, maxraftstate int) []tester.IService {
-	// call labgob.Register on structures you want
-	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(rsm.Op{})
-	labgob.Register(rpc.PutArgs{})
-	labgob.Register(rpc.GetArgs{})
-
 	kv := &KVServer{me: me}
-
-
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
-	// You may need initialization code here.
+	kv.data = make(map[Key]*Entry, KVInitialCapacity)
+	kv.dlog("StartKVServer %#v", kv)
 	return []tester.IService{kv, kv.rsm.Raft()}
+}
+
+
+func (kv *KVServer) dlog(format string, a ...interface{}) {
+	dataformat := func() string {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		var b strings.Builder
+		for key := range kv.data {
+			fmt.Fprintf(&b, "[%v] %#v", key, kv.data[key])
+		}
+		return b.String()
+	}
+	args := []any{
+		kv.me,
+		dataformat(),
+	}
+	args = append(args, a...)
+	DPrintf("[KVServer %v %#v] " + format, args...)
 }
