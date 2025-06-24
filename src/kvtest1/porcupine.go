@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"encoding/gob"
 
 	"github.com/anishathalye/porcupine"
 
@@ -184,4 +185,21 @@ func (ts *Test) CheckPorcupineT(nsec time.Duration) {
 	// that the vis file containing client operations (generated here) won't be
 	// overridden by that without client operations (generated at cleanup time).
 	checkPorcupine(ts.t, ts.oplog, nsec)
+}
+
+func (ts *Test) SaveOplog(path string) error {
+	oplog := ts.oplog.Read()
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	gob.Register(porcupine.Operation{})
+	gob.Register(models.KvInput{})
+	gob.Register(models.KvOutput{})
+
+	enc := gob.NewEncoder(f)
+	err = enc.Encode(oplog)
+	if err != nil {
+		return err
+	}
 }
