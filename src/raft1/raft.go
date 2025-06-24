@@ -34,7 +34,7 @@ const (
 	electionTimeoutMax time.Duration = 600 * time.Millisecond
 
 	heartbeatInterval time.Duration = 50 * time.Millisecond // interval for empty AppendEntries
-	replicateInterval time.Duration = 10 * time.Millisecond // interval for non-empty AppendEntries
+	replicateInterval time.Duration = 3 * time.Millisecond // interval for non-empty AppendEntries
 	initialLogQueueCapacity int = 1024
 
 	OPT_BACK_UP_INCONSITENT_IN_TERM bool = true
