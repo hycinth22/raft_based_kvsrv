@@ -575,7 +575,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.commitIndex = lastLogIndex
 		}
 		rf.dlog("[Follower][AppendEntries] update commitIndex to %v", rf.commitIndex)
-		rf.applyEntries()
+
+		// applyEntries is unrelated to consesus, all entries should be applied has been commit in cluster, do by itself later
+		// this way will not slow down rpc response
+		go func() {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			rf.applyEntries()
+		}()
 	}
 }
 
@@ -841,7 +848,13 @@ func (rf *Raft) leaderBumpCommit() {
 			rf.dlog("[Leader Replication] set commitIndex to %v", rf.commitIndex)
 		}
 	}
-	rf.applyEntries()
+	// applyEntries is unrelated to consesus, all entries should be applied has been commit in cluster, do by itself later
+	// this way will not slow down appendEntriesToPeer
+	go func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		rf.applyEntries()
+	}()
 }
 
 func (rf *Raft) startReplication(term int) bool {
