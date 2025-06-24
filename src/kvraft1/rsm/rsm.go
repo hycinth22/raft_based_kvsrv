@@ -4,6 +4,7 @@ import (
 	"time"
 	"sync"
 	"sync/atomic"
+	"runtime"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
@@ -41,18 +42,20 @@ type StateMachine interface {
 }
 
 type RSM struct {
-	mu           sync.Mutex
 	me           int
 	rf           raftapi.Raft
 	applyCh      chan raftapi.ApplyMsg
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 
-	waitingOpIndex atomic.Int64
+	mu           sync.Mutex
 
-	condApply      *sync.Cond
-	appliedOpIndex int64
-	applyResult    *OpResult
+	waitingOpReqId chan int
+
+	waitingApplyReq atomic.Int64  // only for dlog  now
+	appliedOpIndex atomic.Int64  //  only for dlog and sanity checking now
+
+	applyResult    sync.Map      // map[int]chan OpResult
 
 	closed         atomic.Bool
 }
@@ -78,11 +81,9 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
-
-		condApply:      sync.NewCond(&sync.Mutex{}),
-		appliedOpIndex: 0,
 	}
-	rsm.waitingOpIndex.Store(-1)
+	rsm.waitingOpReqId = make(chan int, 1024)
+	// rsm.applyResult = make(map[int]chan OpResult, 1024)
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
@@ -94,119 +95,159 @@ func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
 
-
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
 // try again.
 func (rsm *RSM) Submit(req any) (rpc.Err, any) {
-	rsm.mu.Lock()
-	defer rsm.mu.Unlock()
-	// generate op and assign unique ReqId to it
-	reqId := int(time.Now().UnixNano())
-	op := Op{Submitter: rsm.me, ReqId: reqId, Req: req}
+	var op Op
 
 	// submit to raft
-	rsm.dlog("[op %v] Start to submit %#v", op.ReqId, op)
-	index, startTerm, ok := rsm.rf.Start(op)
-	if !ok {
-		rsm.dlog("submit fail because it's not the leader")
-		return rpc.ErrWrongLeader, nil // i'm not leader, try another server.
-	}
-	rsm.dlog("start to submit in the node index %d term %d", index, startTerm)
+	submitReq := func(req any) (bool, int, int) {
+		rsm.mu.Lock()
+		defer rsm.mu.Unlock()
 
-	// make sure reqId unique for next submit
-	for int(time.Now().UnixNano()) == reqId {
-		time.Sleep(1 * time.Nanosecond)
-	}
+		// generate op and assign unique ReqId to it
+		reqId := int(time.Now().UnixNano())
+		op = Op{Submitter: rsm.me, ReqId: reqId, Req: req}
 
-	rsm.waitingOpIndex.Store(int64(index))
-	rsm.dlog("[op %v] Submit waitingOpIndex %v", op, index)
+		// submit to raft
+		rsm.dlog("[op %v] Start to submit %#v", op.ReqId, op)
+		index, term, ok := rsm.rf.Start(op)
+		if !ok {
+			rsm.dlog("submit fail because it's not the leader")
+			return false, index, term
+		}
+		rsm.dlog("start to submit in the node index %d term %d", index, term)
+
+		rsm.dlog("[op %v %v] Submit waitingOpIndex %v", index, op, index)
+
+		rsm.applyResult.Store(index, make(chan OpResult, 1))
+		// rsm.applyResultMu.Lock()
+		// rsm.applyResult[index] = make(chan OpResult, 1)
+		// rsm.applyResultMu.Unlock()
+
+		// make sure reqId unique for next submit
+		for int(time.Now().UnixNano()) == reqId {
+			time.Sleep(1 * time.Nanosecond)
+		}
+		return true, index, term
+	}
 
 	// checking our request is commited in raft...
-	done := make(chan bool, 2)
-	go func() {
-		rsm.condApply.L.Lock()
-		defer rsm.condApply.L.Unlock()
-		rsm.dlog("[op %v] Submit first checking...", op)
-		for !rsm.closed.Load() && rsm.appliedOpIndex < int64(index){
-			rsm.dlog("[op %v] Submit condApply.Wait...", op)
-			rsm.condApply.Wait()
-			rsm.dlog("[op %v] Submit condApply.Wait done", op)
-		}
-		done <- true
-	}()
-	go func() {
-		for {
-			currentTerm, isLeader := rsm.rf.GetState()
-			if !isLeader || currentTerm != startTerm {
-				done <- false
-				return // i'm no longer leader, the result is unkonwn
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	}()
-	<- done
-	if rsm.closed.Load() || rsm.applyResult == nil {
-		rsm.dlog("[op %v] submit result ErrMaybe.", op)
-		return rpc.ErrMaybe, nil // i'm dead, the result is unkonwn
-	}
-	rsm.dlog("[op %v] Submit ready to produce result", op)
-	//  submited but failed on agreement... different entry appears on this index
-	if rsm.appliedOpIndex > int64(index) || rsm.applyResult.Submitter != rsm.me {
-		rsm.dlog("[op %v] Submit ErrWrongLeader", op)
-		return rpc.ErrWrongLeader, nil
-	}
-	// rsm.appliedOpIndex == index, rsm.applyResult.Submitter == rsm.me
-	// so our req is applied successfully
-	if op.ReqId != reqId {
-		panic("op.ReqId != reqId") // something wrong
-	}
-	opResult := rsm.applyResult
-	rsm.applyResult = nil
-	result := opResult.Result
-	rsm.dlog("[op %v] submit successfully. apply op %#v result %#v", op.ReqId, op, result)
-	return rpc.OK, result
+	waitForCommited := func(index int, term int) (rpc.Err, any) {
+		var opResult *OpResult
 
-	// // our request maybe lost because fail of agreement
-	// currentTerm, isLeader := rsm.rf.GetState()
-	// if !isLeader || currentTerm != startTerm {
-	// 	rsm.dlog("[op %v] submit result ErrWrongLeader.")
-	// 	return rpc.ErrWrongLeader, nil // i'm not leader, try another server.
-	// }
+		noLongerLeader := make(chan struct{}, 1)
+		go func() {
+			startTime := time.Now()
+			for !rsm.closed.Load() && time.Since(startTime) < 2000 * time.Millisecond {
+				currentTerm, isLeader := rsm.rf.GetState()
+				if !isLeader || currentTerm != term {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			noLongerLeader <- struct{}{}
+		}()
+		applyResultCh, ok := rsm.applyResult.Load(index)
+		if !ok {
+			panic("applyResult[index] should already set in submitReq")
+		}
+		select {
+		case applyResult := <- applyResultCh.(chan OpResult):
+			opResult = &applyResult
+		case <- noLongerLeader:
+			return rpc.ErrMaybe, nil
+		case <- time.After(2000 * time.Millisecond) :
+			return rpc.ErrWrongLeader, nil
+		}
+
+		rsm.dlog("[op %v %v] Submit ready to produce result", index, op)
+
+		rsm.applyResult.Delete(index)
+		// rsm.applyResultMu.Lock()
+		// delete(rsm.applyResult, index)
+		// rsm.applyResultMu.Unlock()
+
+		if opResult == nil {
+			return rpc.ErrWrongLeader, nil  // i'm dead
+		}
+
+		if opResult.Submitter != rsm.me {
+			// submited but failed on agreement... different entry appears on this index
+			rsm.dlog("[op %v %v] Submit ErrWrongLeader", index, op)
+			return rpc.ErrWrongLeader, nil
+		}
+
+		// our req is applied successfully
+		if opResult.ReqId != op.ReqId {
+			panic("opResult.ReqId != op.ReqId") // something wrong
+		}
+		result := opResult.Result
+		rsm.dlog("[op %v %v] submit successfully. apply op %#v result %#v", index, op.ReqId, op, result)
+		return rpc.OK, result
+
+	}
+
+	ok, index, term := submitReq(req)
+	if  !ok {
+		return rpc.ErrWrongLeader, nil // i'm not leader, try another server.
+	}
+	return waitForCommited(index, term)
 }
 
 func (rsm *RSM) reader() {
+	waitingOpReqId := -1
+	updateWaitingOpReqId := func() bool {
+		rsm.dlog("enter waitingOpReqId")
+		select{
+		case waitingOpReqId = <- rsm.waitingOpReqId:
+			rsm.waitingApplyReq.Store(int64(waitingOpReqId))
+			rsm.dlog("com waitingOpReqId %v", waitingOpReqId)
+			return true // ok
+		default:
+			rsm.dlog("fail waitingOpReqId")
+			return false // donothing
+		}
+	}
 	for msg := range rsm.applyCh {
 		if msg.CommandValid {
 			func() {
-				rsm.condApply.L.Lock()
-				defer rsm.condApply.L.Unlock()
-				rsm.appliedOpIndex++
+				rsm.dlog("receive apply msg %#v", msg)
+				index := msg.CommandIndex
+
+				rsm.appliedOpIndex.Add(1)
+				if rsm.appliedOpIndex.Load() != int64(index) {
+					panic("wrong command index. something preceding not applied")
+				}
+
 				op := msg.Command.(Op)
 				rsm.dlog("apply op %#v", op)
 				result := rsm.sm.DoOp(op.Req)
-				opResult := &OpResult{
+				opResult := OpResult{
 					Submitter: op.Submitter,
 					ReqId:     op.ReqId,
 					Result:    result,
 				}
-				rsm.dlog("apply op result %#v %p", result, rsm)
+				rsm.dlog("apply op %v result %#v %p", index, result, rsm)
 
-				// not all op which op.Commiter=rsm.me need to be pass via rsm.applyResult
+				if waitingOpReqId == -1 {
+					updateWaitingOpReqId()
+				}
+				applyResultCh, ok := rsm.applyResult.Load(index)
+				// not all op although op.Commiter=rsm.me need to be pass via rsm.applyResult
 				// because its may be replaying(crash or others)... so no Submit() is waiting for it
-				// check the situation using rsm.waitingOpIndex
-				if rsm.appliedOpIndex == rsm.waitingOpIndex.Load() {
+				// check the situation via checking applyResultCh existing
+				// if waitingOpReqId == op.ReqId but !ok, it says submit but applyResult not set yet, wait it
+				for waitingOpReqId == op.ReqId && !ok {
+					applyResultCh, ok = rsm.applyResult.Load(index)
+					runtime.Gosched()
+				}
+				if ok {
 					// pass the apply result
-					rsm.applyResult = opResult
-					// wakes all waiting Submit().
-					// one will consume the applyResult and return success
-					// older will see they be outdated and return error
-					// newer still wait
-					rsm.dlog("condApply.Broadcast for op %v result%#v", op, opResult)
-					rsm.condApply.L.Unlock()
-					rsm.condApply.Broadcast()
-					rsm.condApply.L.Lock()
-					rsm.dlog("condApply.Broadcast over")
+					rsm.dlog("send apply op %v result %#v %p", index, result, rsm)
+					applyResultCh.(chan OpResult) <- opResult
+					rsm.dlog("sent apply op %v result %#v %p", index, result, rsm)
 				}
 			}()
 
@@ -215,16 +256,16 @@ func (rsm *RSM) reader() {
 		}
 	}
 	rsm.closed.Store(true)
-	rsm.condApply.Broadcast() // notify the closing
 }
 
 
 func (rsm *RSM) dlog(format string, a ...interface{}) {
 	args := []any{
 		rsm.me,
-		rsm.waitingOpIndex.Load(),
-		rsm.appliedOpIndex,
+		-1,
+		rsm.waitingApplyReq.Load(),
+		rsm.appliedOpIndex.Load(),
 	}
 	args = append(args, a...)
-	DPrintf("[rsm %v waiting %v applied %v] " + format, args...)
+	DPrintf("[rsm %v waitingApplyReq %v applied %v] " + format, args...)
 }
