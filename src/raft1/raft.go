@@ -706,7 +706,7 @@ func (rf *Raft) Kill() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.persist()
-	rf.dlog("node stop\n %#v", rf)
+	rf.dlog("node stop down")
 	close(rf.applyCh)
 }
 
@@ -833,7 +833,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
-	rf.dlog("node start")
+	rf.dlog("node start up")
 
 	// start ticker goroutine to start elections
 	go rf.electionTicker()
