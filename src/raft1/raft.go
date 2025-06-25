@@ -108,10 +108,6 @@ type RaftPersistState struct {
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
-// before you've implemented snapshots, you should pass nil as the
-// second argument to persister.Save().
-// after you've implemented snapshots, pass the current snapshot
-// (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -432,33 +428,14 @@ func (rf *Raft) discardAllEntries() {
 }
 
 // send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	// servers may be unreachable, and in which requests and replies may be lost.
+	// Call() sends a request and waits for a reply. If a reply arrives
+	// within a timeout interval, Call() returns true; otherwise
+	// Call() returns false. Thus Call() may not return for a while.
+	// Call() is guaranteed to return (perhaps after a delay) *except* if the
+	// handler function on the server side does not return.
+	// Thus there is no need to implement another timeouts around Call().
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -703,15 +680,8 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	return
 }
 
-// the tester doesn't halt goroutines created by Raft after each test,
-// but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
-//
-// the issue is that long-running goroutines use memory and may chew
-// up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
-// should call killed() to check whether it should stop.
+
+
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	rf.mu.Lock()
@@ -721,6 +691,13 @@ func (rf *Raft) Kill() {
 	close(rf.applyCh)
 }
 
+// use killed() to check whether Kill() has been called.
+//
+// the issue is that long-running goroutines use memory and may chew
+// up CPU time, perhaps causing later tests to fail and generating
+// confusing debug output.
+//
+// any goroutine with a long-running loop should call killed() to check whether it should stop.
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
@@ -873,11 +850,6 @@ func (rf *Raft) leaderTicker(term int) {
 }
 
 func (rf *Raft) leaderBumpCommit() {
-	// if rf.role != ROLE_LEADER || rf.currentTerm != term {
-	// 	rf.dlog("[Leader Applier] Leader Applier stop")
-	// 	return
-	// }
-
 	// bump commit index in leader if majarity replicated
 	lastLogIndex := rf.getLastLogIndex()
 	if rf.commitIndex < rf.snapshot.lastSnapshotIndex {

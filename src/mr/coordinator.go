@@ -7,11 +7,9 @@ import "net/rpc"
 import "net/http"
 import "time"
 import "fmt"
-//import "io"
 import "sync/atomic"
 
 type Coordinator struct {
-	// Your definitions here.
 	nMap int
 	nReduce int
 	files []string
@@ -29,17 +27,6 @@ type Coordinator struct {
 	reduceNext chan int
 }
 
-// Your code here -- RPC handlers for the worker to call.
-
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
 
 func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWorkerReply) error {
 	reply.WorkerId = int(c.nextWorkerId.Add(1))
@@ -163,12 +150,7 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-	ret = c.stage.Load() == 2
-
-	return ret
+	return c.stage.Load() == 2
 }
 
 func (c *Coordinator) NextUnmappedFile() (int, string) {
@@ -195,9 +177,6 @@ func (c *Coordinator) NextUncompletedReduce() int {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
-
-	// Your code here.
-	//log.SetOutput(io.Discard)
 	nFiles := len(files)
 	c.stage.Store(0)
 	c.nReduce = nReduce;
@@ -209,7 +188,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	for i:=0; i<nFiles; i++ {
 		c.mapNext <- i
 	}
-
 	c.server()
 	return &c
 }
