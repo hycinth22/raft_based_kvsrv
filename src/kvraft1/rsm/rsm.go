@@ -30,6 +30,10 @@ type OpResult struct {
 	Result     any
 }
 
+func init() {
+	labgob.Register(Op{})
+}
+
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
 // interface allows the rsm package to interact with the server for
