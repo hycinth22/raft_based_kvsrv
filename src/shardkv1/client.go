@@ -9,9 +9,12 @@ package shardkv
 //
 
 import (
+	"log"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
+	"6.5840/shardkv1/shardgrp"
+	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardctrler"
 	"6.5840/tester1"
 )
@@ -19,7 +22,6 @@ import (
 type Clerk struct {
 	clnt *tester.Clnt
 	sck  *shardctrler.ShardCtrler
-	// You will have to modify this struct.
 }
 
 // The tester calls MakeClerk and passes in a shardctrler so that
@@ -29,23 +31,48 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 		clnt: clnt,
 		sck:  sck,
 	}
-	// You'll have to add code here.
 	return ck
 }
 
 
-// Get a key from a shardgrp.  You can use shardcfg.Key2Shard(key) to
-// find the shard responsible for the key and ck.sck.Query() to read
-// the current configuration and lookup the servers in the group
-// responsible for key.  You can make a clerk for that group by
-// calling shardgrp.MakeClerk(ck.clnt, servers).
+// Get a key from a shardgrp.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	// You will have to modify this function.
-	return "", 0, ""
+	shardId := key2shardId(key)
+	sgck := ck.makeShardGroupClerk(shardId)
+	val, ver, err := sgck.Get(key)
+	for err == rpc.ErrWrongGroup {
+		sgck := ck.makeShardGroupClerk(shardId)
+		val, ver, err = sgck.Get(key)
+		log.Println("Get retry")
+	}
+	return val, ver, err
 }
 
 // Put a key to a shard group.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return ""
+	shardId := key2shardId(key)
+	sgck := ck.makeShardGroupClerk(shardId)
+	err := sgck.Put(key, value, version)
+	for err == rpc.ErrWrongGroup {
+		sgck := ck.makeShardGroupClerk(shardId)
+		err = sgck.Put(key, value, version)
+		log.Println("Put retry")
+	}
+	return err
+}
+
+func key2shardId(key string) shardcfg.Tshid {
+	shardId := shardcfg.Key2Shard(key)
+	return shardId
+}
+
+func (ck *Clerk) makeShardGroupClerk(shardId  shardcfg.Tshid) *shardgrp.Clerk {
+	config := ck.sck.Query()
+	gid, srvs, ok := config.GidServers(shardId)
+	if !ok {
+		log.Println("GidServers failed. invalid gid?", gid)
+		panic("GidServers failed. invalid gid?")
+	}
+	sgck := shardgrp.MakeClerk(ck.clnt, srvs)
+	return sgck
 }

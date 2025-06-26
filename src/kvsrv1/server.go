@@ -28,14 +28,12 @@ type Value struct {
 type KVServer struct {
 	mu sync.Mutex
 
-	// Your definitions here.
 	rpcsrv *labrpc.Server
 	kvpairs map[Key]Value
 }
 
 func MakeKVServer() *KVServer {
 	kv := &KVServer{}
-	// Your code here.
 	kv.kvpairs = make(map[Key]Value)
 	rpcsrv := labrpc.MakeServer()
 	rpcsrv.AddService(labrpc.MakeService(kv))
@@ -103,12 +101,9 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	return
 }
 
-// You can ignore Kill() for this lab
 func (kv *KVServer) Kill() {
 }
 
-
-// You can ignore all arguments; they are for replicated KVservers
 func StartKVServer(ends []*labrpc.ClientEnd, gid tester.Tgid, srv int, persister *tester.Persister) []tester.IService {
 	kv := MakeKVServer()
 	return []tester.IService{kv}

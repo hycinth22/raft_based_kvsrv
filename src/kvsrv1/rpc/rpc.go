@@ -12,8 +12,11 @@ const (
 	ErrMaybe = "ErrMaybe"
 
 	// For future kvraft lab
-	ErrWrongLeader = "ErrWrongLeader"
-	ErrWrongGroup  = "ErrWrongGroup"
+	ErrWrongLeader       = "ErrWrongLeader"
+	ErrWrongGroup        = "ErrWrongGroup"
+	ErrNoShard           = "ErrNoShard"
+	ErrExistShard        = "ErrExistShard"
+	ErrInvalidShardState = "ErrInvalidShardState"
 )
 
 type Tversion uint64
