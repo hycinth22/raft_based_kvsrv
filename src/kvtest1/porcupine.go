@@ -198,8 +198,5 @@ func (ts *Test) SaveOplog(path string) error {
 	gob.Register(models.KvOutput{})
 
 	enc := gob.NewEncoder(f)
-	err = enc.Encode(oplog)
-	if err != nil {
-		return err
-	}
+	return enc.Encode(oplog)
 }
