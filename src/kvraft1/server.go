@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	DLOG_DATA         bool = true
 	KVInitialCapacity int = 1024
 )
 
@@ -201,11 +202,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 
 func (kv *KVServer) dlog(format string, a ...interface{}) {
 	dataformat := func() string {
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
 		var b strings.Builder
-		for key := range kv.data {
-			fmt.Fprintf(&b, "[%v] %#v", key, kv.data[key])
+		if DLOG_DATA {
+			kv.mu.Lock()
+			defer kv.mu.Unlock()
+			fmt.Fprintln(b, "{")
+			for key := range kv.data {
+				fmt.Fprintf(&b, "[%v] %#v", key, kv.data[key])
+			}
+			fmt.Fprintln(b, "}")
 		}
 		return b.String()
 	}
@@ -214,5 +219,5 @@ func (kv *KVServer) dlog(format string, a ...interface{}) {
 		dataformat(),
 	}
 	args = append(args, a...)
-	DPrintf("[KVServer %v %#v] " + format, args...)
+	DPrintf("[KVServer %v %v, %#v] " + format, args...)
 }
