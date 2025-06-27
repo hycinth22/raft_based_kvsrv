@@ -17,6 +17,7 @@ const (
 	ErrNoShard           = "ErrNoShard"
 	ErrExistShard        = "ErrExistShard"
 	ErrInvalidShardState = "ErrInvalidShardState"
+	ErrgGroupMaybeLeave  = "ErrgGroupMaybeLeave"
 )
 
 type Tversion uint64

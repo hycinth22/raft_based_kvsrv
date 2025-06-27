@@ -40,8 +40,8 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	shardId := key2shardId(key)
 	sgck := ck.makeShardGroupClerk(shardId)
 	val, ver, err := sgck.Get(key)
-	for err == rpc.ErrWrongGroup {
-		sgck := ck.makeShardGroupClerk(shardId)
+	for err == rpc.ErrWrongGroup || err == rpc.ErrgGroupMaybeLeave {
+		sgck = ck.makeShardGroupClerk(shardId)
 		val, ver, err = sgck.Get(key)
 		log.Println("Get retry")
 	}
@@ -53,8 +53,8 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	shardId := key2shardId(key)
 	sgck := ck.makeShardGroupClerk(shardId)
 	err := sgck.Put(key, value, version)
-	for err == rpc.ErrWrongGroup {
-		sgck := ck.makeShardGroupClerk(shardId)
+	for err == rpc.ErrWrongGroup || err == rpc.ErrgGroupMaybeLeave {
+		sgck = ck.makeShardGroupClerk(shardId)
 		err = sgck.Put(key, value, version)
 		log.Println("Put retry")
 	}

@@ -68,17 +68,17 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		}
 		if oldgid != newgid {
 			oldclk, newclk := shardgrp.MakeClerk(sck.clnt, oldsrvs), shardgrp.MakeClerk(sck.clnt, newsrvs)
-			shard, err := oldclk.FreezeShard(shardId, new.Num)
+			shard, err := freezeShard(oldclk, shardId, new.Num)
 			if err != rpc.OK {
 				log.Println("[ChangeConfigTo] FreezeShard error: ", err, "shardId", shardId, "oldgid", oldgid, "newgid", newgid)
 				return
 			}
-			err = newclk.InstallShard(shardId, shard, new.Num)
+			err = installShard(newclk, shardId, shard, new.Num)
 			if err != rpc.OK {
 				log.Println("[ChangeConfigTo] InstallShard error: ", err, "shardId", shardId, "oldgid", oldgid, "newgid", newgid)
 				return
 			}
-			err = oldclk.DeleteShard(shardId, new.Num)
+			err = deleteShard(oldclk, shardId, new.Num)
 			if err != rpc.OK {
 				log.Println("[ChangeConfigTo] DeleteShard error: ", err, "shardId", shardId, "oldgid", oldgid, "newgid", newgid)
 				return
@@ -115,4 +115,28 @@ func (sck *ShardCtrler) putConfig(cfg *shardcfg.ShardConfig, oldVersion rpc.Tver
 		return err
 	}
 	return rpc.OK
+}
+
+func freezeShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
+	shard, err := sgck.FreezeShard(s, num)
+	for err == rpc.ErrgGroupMaybeLeave {
+		shard, err = sgck.FreezeShard(s, num)
+	}
+	return shard, err
+}
+
+func installShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, state []byte, num shardcfg.Tnum) rpc.Err {
+	err := sgck.InstallShard(s, state, num)
+	for err == rpc.ErrgGroupMaybeLeave {
+		err = sgck.InstallShard(s, state, num)
+	}
+	return err
+}
+
+func deleteShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
+	err := sgck.DeleteShard(s, num)
+	for err == rpc.ErrgGroupMaybeLeave {
+		err = sgck.DeleteShard(s, num)
+	}
+	return err
 }
