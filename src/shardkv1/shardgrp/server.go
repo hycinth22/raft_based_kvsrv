@@ -15,8 +15,6 @@ import (
 )
 
 const (
-	Force bool = true
-
 	ShardsInitCapacity int = 1024
 	SingleShardInitCapacity int = 1024
 )

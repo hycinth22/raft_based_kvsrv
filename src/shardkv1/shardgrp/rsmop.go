@@ -127,16 +127,10 @@ func (kv *KVServer) doInstallShard(op InstallShardOp) (reply shardrpc.InstallSha
 	shardId := args.Shard
 	state := args.State
 	shard, ok := kv.makeShard(shardId)
-	if Force {
+	if !ok {
 		shard, ok = kv.getShard(shardId)
 		if !ok {
 			panic("makeShard report shard already exists but getShared failed...")
-		}
-	} else {
-		if !ok {
-			kv.dlog("[doFreezeShard] InstallShard already exist%#v", op.Args)
-			reply.Err = rpc.ErrExistShard
-			return
 		}
 	}
 	if args.Num < shard.ConfigNum {
@@ -161,11 +155,7 @@ func (kv *KVServer) doDeleteShard(op DeleteShardOp) (reply shardrpc.DeleteShardR
 	args := op.Args
 	shard, ok := kv.getShard(args.Shard)
 	if !ok {
-		if Force {
-			reply.Err = rpc.OK
-			return
-		}
-		reply.Err = rpc.ErrNoShard
+		reply.Err = rpc.OK
 		return
 	}
 	if args.Num < shard.ConfigNum {
