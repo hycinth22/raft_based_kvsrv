@@ -57,6 +57,10 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 		sgck = ck.makeShardGroupClerk(shardId)
 		err = sgck.Put(key, value, version)
 		log.Println("Put retry")
+		// see explain in sgck.Put()
+		if err == rpc.ErrVersion {
+			err = rpc.ErrMaybe
+		}
 	}
 	return err
 }
