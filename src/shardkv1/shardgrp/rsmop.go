@@ -102,11 +102,11 @@ func (kv *KVServer) doFreezeShard(op FreezeShardOp) (reply shardrpc.FreezeShardR
 	defer kv.mu.Unlock()
 	args := op.Args
 	shard, ok := kv.getShard(args.Shard)
-	reply.Num = shard.ConfigNum
 	if !ok {
 		reply.Err = rpc.ErrNoShard
 		return
 	}
+	reply.Num = shard.ConfigNum
 	if args.Num < shard.ConfigNum {
 		reply.Err = rpc.ErrVersion // stale request
 		return
