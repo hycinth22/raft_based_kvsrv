@@ -80,7 +80,7 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	rerr := sck.deleteMigratingNewConfig(mcfgver)
 	if rerr != rpc.OK {
 		// ErrMaybe is ok, just make sure mcfgver is right
-		if rerr == rpc.ErrMaybe {
+		if rerr == rpc.ErrVersion || rerr == rpc.ErrMaybe {
 			log.Println("[WARNING] deleteMigratingNewConfig result ErrMaybe")
 		} else {
 			panic(rerr)
@@ -99,7 +99,7 @@ func (sck *ShardCtrler) checkAndCompleteMirgratingNewConfig() (rpc.Tversion, err
 		err := sck.deleteMigratingNewConfig(mcfgver)
 		if err != rpc.OK {
 			// ErrMaybe is ok, just make sure mcfgver is right
-			if err == rpc.ErrMaybe {
+			if err == rpc.ErrVersion || err == rpc.ErrMaybe {
 				log.Println("[WARNING] deleteMigratingNewConfig result ErrMaybe")
 			} else {
 				log.Println("recover from an interrupted configuration mirgrating, error:", err)
