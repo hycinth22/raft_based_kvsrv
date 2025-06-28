@@ -106,9 +106,9 @@ func (kv *KVServer) doFreezeShard(op FreezeShardOp) (reply shardrpc.FreezeShardR
 		reply.Err = rpc.ErrNoShard
 		return
 	}
-	reply.Num = shard.ConfigNum
 	if args.Num < shard.ConfigNum {
 		reply.Err = rpc.ErrVersion // stale request
+		reply.Num = shard.ConfigNum
 		return
 	}
 	shard.ConfigNum = args.Num
@@ -143,6 +143,7 @@ func (kv *KVServer) doInstallShard(op InstallShardOp) (reply shardrpc.InstallSha
 		reply.Err = rpc.ErrInvalidShardState
 		return
 	}
+	shard.ConfigNum = args.Num
 	shard.Freezed = false
 	reply.Err = rpc.OK
 	return
@@ -162,6 +163,7 @@ func (kv *KVServer) doDeleteShard(op DeleteShardOp) (reply shardrpc.DeleteShardR
 		reply.Err = rpc.ErrVersion // stale request
 		return
 	}
+	shard.ConfigNum = args.Num
 	kv.deleteShard(args.Shard)
 	reply.Err = rpc.OK
 	return
