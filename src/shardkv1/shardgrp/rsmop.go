@@ -40,7 +40,7 @@ func (kv *KVServer) doGet(op GetOp) (reply rpc.GetReply) {
 	defer kv.mu.Unlock()
 	args := op.Args
 	shard, ok := kv.getShardByKey(args.Key)
-	if !ok {
+	if !ok || !shard.Exist {
 		reply.Err = rpc.ErrWrongGroup
 		return
 	}
@@ -62,7 +62,7 @@ func (kv *KVServer) doPut(op PutOp) (reply rpc.PutReply) {
 	defer kv.mu.Unlock()
 	args := op.Args
 	shard, ok := kv.getShardByKey(args.Key)
-	if !ok || shard.Freezed {
+	if !ok || !shard.Exist || shard.Freezed {
 		reply.Err = rpc.ErrWrongGroup
 		return
 	}
@@ -102,7 +102,7 @@ func (kv *KVServer) doFreezeShard(op FreezeShardOp) (reply shardrpc.FreezeShardR
 	defer kv.mu.Unlock()
 	args := op.Args
 	shard, ok := kv.getShard(args.Shard)
-	if !ok {
+	if !ok || !shard.Exist {
 		reply.Err = rpc.ErrNoShard
 		return
 	}
@@ -112,8 +112,8 @@ func (kv *KVServer) doFreezeShard(op FreezeShardOp) (reply shardrpc.FreezeShardR
 		return
 	}
 	shard.ConfigNum = args.Num
-	shard.Freezed = true
 	shardstate := shard.Snapshot()
+	shard.Freezed = true
 	reply.State = shardstate
 	reply.Err = rpc.OK
 	return
@@ -155,7 +155,7 @@ func (kv *KVServer) doDeleteShard(op DeleteShardOp) (reply shardrpc.DeleteShardR
 	defer kv.mu.Unlock()
 	args := op.Args
 	shard, ok := kv.getShard(args.Shard)
-	if !ok {
+	if !ok || !shard.Exist {
 		reply.Err = rpc.OK
 		return
 	}

@@ -36,6 +36,7 @@ type ConfigNum = shardcfg.Tnum
 
 type Shard struct {
 	Data         map[Key]*Entry
+	Exist        bool
 	Freezed      bool
 	ConfigNum    ConfigNum // greatest version seen
 }
@@ -109,7 +110,15 @@ func (kv *KVServer) makeShard(shardId ShardId) (*Shard, bool) {
 	return kv.shards[shardId], true
 }
 
+// keep the shard metadata remain. distinguish via shard.Exist
 func (kv *KVServer) deleteShard(shardId ShardId) {
+	shard := kv.shards[shardId]
+	shard.Exist = false
+	shard.Data = nil
+}
+
+// delete all about this shard(including metadata)
+func (kv *KVServer) deleteShardHard(shardId ShardId) {
 	delete(kv.shards, shardId)
 }
 
@@ -189,6 +198,7 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 		for shardId := shardcfg.Tshid(0); shardId<shardcfg.NShards; shardId++ {
 			shard, _ := kv.makeShard(shardId)
 			shard.Data = make(map[Key]*Entry, SingleShardInitCapacity)
+			shard.Exist = true
 		}
 	}
 	kv.dlog("StartKVServer %#v", kv)
