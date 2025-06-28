@@ -13,11 +13,19 @@ import (
 	"6.5840/tester1"
 
 	"fmt"
+	"time"
 	"sync/atomic"
 )
 
-const CONFIG_KEY = "ShardCtrlerConfig"
-const CONFIG_MIGRATING_NEW_KEY = "ShardCtrlerMigratingNewConfig"
+const (
+	CONFIG_KEY = "ShardCtrlerConfig"
+	CONFIG_MIGRATING_NEW_KEY = "ShardCtrlerMigratingNewConfig"
+
+	LEASE_KEY = "ShardCtrlerLease"
+	LEASE_TIMEOUT = 100 * time.Millisecond
+)
+
+
 
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
@@ -42,6 +50,10 @@ func (sck *ShardCtrler) Id() int64 {
 	return sck.me
 }
 
+func (sck *ShardCtrler) waitConcurrentCtrler() {
+
+}
+
 // Calls InitController() before starting a new controller.
 func (sck *ShardCtrler) InitController() {
 	sck.checkAndCompleteMirgratingNewConfig()
@@ -61,6 +73,8 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // changes the configuration it may be superseded by another
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
+	donelease, failtokeep := sck.grabLease()
+
 	var mcfgver rpc.Tversion
 	var err error
 	for {
@@ -68,6 +82,11 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		if err != nil {
 			panic(err)
 		}
+
+		if !failtokeep.Load() {
+			sck.grabLease()
+		}
+
 		sck.dlogln("start ChangeConfigTo")
 		rerr := sck.putMigratingNewConfig(new, mcfgver)
 		if rerr == rpc.ErrVersion || rerr == rpc.ErrMaybe {
@@ -80,7 +99,15 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		break
 	}
 
+	if !failtokeep.Load() {
+		sck.grabLease()
+	}
+
 	sck.changeConfigTo(new, false)
+
+	if !failtokeep.Load() {
+		sck.grabLease()
+	}
 
 	rerr := sck.deleteMigratingNewConfig(mcfgver)
 	if rerr != rpc.OK {
@@ -92,6 +119,7 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		}
 	}
 	sck.dlogln("complete ChangeConfigTo")
+	donelease <- struct{}{}
 }
 
 func (sck *ShardCtrler) checkAndCompleteMirgratingNewConfig() (rpc.Tversion, error) {
@@ -225,6 +253,96 @@ func (sck *ShardCtrler) putMigratingNewConfig(cfg *shardcfg.ShardConfig, oldVers
 	return rpc.OK
 }
 
+func (sck *ShardCtrler) setLease(oldVersion rpc.Tversion) rpc.Err {
+	err := sck.IKVClerk.Put(LEASE_KEY, "true", oldVersion)
+	// if err != rpc.OK && err != rpc.ErrNoKey {
+	// 	sck.dlogln("ShardCtrler getConfig RPC error: %v", err)
+	// 	panic(err)
+	// }
+	return err
+}
+
+
+func (sck *ShardCtrler) waitLease() rpc.Tversion {
+	checkLease := func() (bool, rpc.Tversion) {
+		content, version, err := sck.IKVClerk.Get(LEASE_KEY)
+		if err != rpc.OK && err != rpc.ErrNoKey {
+			sck.dlogln("ShardCtrler getConfig RPC error: %v", err)
+			panic(err)
+		}
+		if err == rpc.ErrNoKey {
+			return false, rpc.Tversion(0)
+		}
+		return content!="", version
+	}
+
+	exist, ver := checkLease()
+	for exist {
+		time.Sleep(2 * LEASE_TIMEOUT)
+		exist2, ver2 := checkLease()
+		if exist2 {
+			if ver == ver2 {
+				// expired
+				return ver2
+			} else {
+				// continue to wait
+				ver = ver2
+			}
+		} else {
+			// ok...
+			return ver2
+		}
+	}
+	return ver
+}
+
+func (sck *ShardCtrler) contendLease(ver rpc.Tversion) bool {
+	err := sck.setLease(ver)
+	if err == rpc.ErrVersion || err == rpc.ErrMaybe {
+		return false
+	}
+	sck.dlog("contendLease succ num:%v", ver+1)
+	return true
+}
+
+func (sck *ShardCtrler) keepLease(ver rpc.Tversion) (chan<- struct{}, *atomic.Bool) {
+	done := make(chan struct{}, 1)
+	failtokeep := &atomic.Bool{}
+	go func() {
+		for {
+			select {
+			case <-done:
+				sck.dlog("doneLease...")
+				sck.IKVClerk.Put(LEASE_KEY, "", ver)
+				return
+			default:
+				sck.dlog("keepLease...")
+				err := sck.setLease(ver)
+				if err == rpc.ErrVersion || err == rpc.ErrMaybe {
+					sck.dlog("failtokeep!")
+					failtokeep.Store(true)
+					return
+				}
+				ver++
+				time.Sleep(LEASE_TIMEOUT)
+			}
+		}
+	}()
+	return done, failtokeep
+}
+
+func (sck *ShardCtrler) grabLease() (chan<- struct{}, *atomic.Bool) {
+	ownLease := false
+	var ver rpc.Tversion
+	for !ownLease {
+		sck.dlog("waitLease...")
+		ver = sck.waitLease()
+		sck.dlog("contendLease!")
+		ownLease = sck.contendLease(ver)
+	}
+	return sck.keepLease(ver)
+}
+
 // return rpc.OK if ok
 // return rpc.ErrVersion if oldVersion donot match
 // return rpc.ErrMaybe if ErrVersion but in retring....
@@ -287,6 +405,7 @@ func deleteShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, num shardcfg.Tnum) rpc.
 	}
 	return err
 }
+
 func (sck *ShardCtrler) dlog(format string, a ...interface{}) {
 	args := []any{
 		sck.me,
