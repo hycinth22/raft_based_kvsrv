@@ -12,31 +12,34 @@ import (
 	"6.5840/shardkv1/shardgrp"
 	"6.5840/tester1"
 
-	"log"
 	"fmt"
-	"io"
+	"sync/atomic"
 )
 
 const CONFIG_KEY = "ShardCtrlerConfig"
 const CONFIG_MIGRATING_NEW_KEY = "ShardCtrlerMigratingNewConfig"
 
-func init() {
-	log.SetOutput(io.Discard)
-}
-
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
 	clnt *tester.Clnt
 	kvtest.IKVClerk
+	me int64
 }
+
+var sckCnt atomic.Int64
 
 // Make a ShardCltler, which stores its state in a kvsrv.
 func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 	sck := &ShardCtrler{clnt: clnt}
 	srv := tester.ServerName(tester.GRP0, 0)
 	sck.IKVClerk = kvsrv.MakeClerk(clnt, srv)
+	sck.me = sckCnt.Add(1)
 	// log.Println("[ShardCtrler] start up")
 	return sck
+}
+
+func (sck *ShardCtrler) Id() int64 {
+	return sck.me
 }
 
 // Calls InitController() before starting a new controller.
@@ -65,10 +68,10 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		if err != nil {
 			panic(err)
 		}
-		log.Println("start ChangeConfigTo")
+		sck.dlogln("start ChangeConfigTo")
 		rerr := sck.putMigratingNewConfig(new, mcfgver)
 		if rerr == rpc.ErrVersion || rerr == rpc.ErrMaybe {
-			continue // retry to check
+			continue // retry until we publish migrating config successfully
 		}
 		if rerr != rpc.OK {
 			panic(rerr)
@@ -76,17 +79,19 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		mcfgver++
 		break
 	}
+
 	sck.changeConfigTo(new, false)
+
 	rerr := sck.deleteMigratingNewConfig(mcfgver)
 	if rerr != rpc.OK {
 		// ErrMaybe is ok, just make sure mcfgver is right
 		if rerr == rpc.ErrVersion || rerr == rpc.ErrMaybe {
-			log.Println("[WARNING] deleteMigratingNewConfig result ErrMaybe")
+			sck.dlogln("[WARNING] deleteMigratingNewConfig result ErrVersion or ErrMaybe.  Maybe a concurrent ctrler is running... or just network failure")
 		} else {
 			panic(rerr)
 		}
 	}
-	log.Println("complete ChangeConfigTo")
+	sck.dlogln("complete ChangeConfigTo")
 }
 
 func (sck *ShardCtrler) checkAndCompleteMirgratingNewConfig() (rpc.Tversion, error) {
@@ -94,19 +99,19 @@ func (sck *ShardCtrler) checkAndCompleteMirgratingNewConfig() (rpc.Tversion, err
 	mcfg, mcfgver := sck.getMigratingNewConfig()
 	if mcfg != nil {
 		// recovery from an interrupted configuration mirgrating
-		log.Println("detect an interrupted configuration mirgrating, recovering")
+		sck.dlogln("detect an interrupted configuration mirgrating, recovering")
 		sck.changeConfigTo(mcfg, true)
 		err := sck.deleteMigratingNewConfig(mcfgver)
 		if err != rpc.OK {
 			// ErrMaybe is ok, just make sure mcfgver is right
 			if err == rpc.ErrVersion || err == rpc.ErrMaybe {
-				log.Println("[WARNING] deleteMigratingNewConfig result ErrMaybe")
+				sck.dlogln("[WARNING] deleteMigratingNewConfig result ErrMaybe. Maybe a concurrent ctrler is running... or just network failure")
 			} else {
-				log.Println("recover from an interrupted configuration mirgrating, error:", err)
+				sck.dlogln("recover from an interrupted configuration mirgrating, error:", err)
 				return 0, fmt.Errorf("recover from an interrupted configuration mirgrating, error: %v", err)
 			}
 		}
-		log.Println("recovered from an interrupted configuration mirgrating")
+		sck.dlogln("recovered from an interrupted configuration mirgrating")
 	}
 	return mcfgver, nil
 }
@@ -119,34 +124,41 @@ func (sck *ShardCtrler) changeConfigTo(new *shardcfg.ShardConfig, isrecover bool
 	for shardId := shardcfg.Tshid(0); shardId<shardcfg.NShards; shardId++ {
 		oldgid, oldsrvs, ok := old.GidServers(shardId)
 		if !ok {
-			log.Println("[ChangeConfigTo] get old.GidServers failed.", "shardId", shardId)
+			sck.dlogln("[ChangeConfigTo] get old.GidServers failed.", "shardId", shardId)
 			return
 		}
 		newgid, newsrvs, ok := new.GidServers(shardId)
 		if !ok {
-			log.Println("[ChangeConfigTo] get new.GidServers failed.", "shardId", shardId)
+			sck.dlogln("[ChangeConfigTo] get new.GidServers failed.", "shardId", shardId)
 			return
 		}
 		if oldgid != newgid {
+			sck.dlogln("moving shard from ", oldgid, " to ", newgid)
 			oldclk, newclk := shardgrp.MakeClerk(sck.clnt, oldsrvs), shardgrp.MakeClerk(sck.clnt, newsrvs)
+			sck.dlogln("freezeShard")
 			shard, err := freezeShard(oldclk, shardId, new.Num)
+			sck.dlogln("freezeShard over")
 			if err != rpc.OK {
 				if isrecover && err == rpc.ErrNoShard {
-					log.Println("[ChangeConfigTo] FreezeShard report noshard. maybe moving this shard has been completed by previous shardctrler.... continue", "shardId", shardId, "oldgid", oldgid, "newgid", newgid)
+					sck.dlogln("[ChangeConfigTo] FreezeShard report noshard. maybe moving this shard has been completed by previous shardctrler.... continue. ", "shardId", shardId, "oldgid", oldgid, "newgid", newgid)
 					continue // process next shard
 				} else {
-					log.Println("[ChangeConfigTo] FreezeShard error: ", err, "shardId", shardId, "oldgid", oldgid, "newgid", newgid)
+					sck.dlogln("[ChangeConfigTo] FreezeShard error: ", err, "shardId", shardId, "oldgid", oldgid, "newgid", newgid)
 					return
 				}
 			}
+			sck.dlogln("installShard")
 			err = installShard(newclk, shardId, shard, new.Num)
+			sck.dlogln("installShard over")
 			if err != rpc.OK {
-				log.Println("[ChangeConfigTo] InstallShard error: ", err, "shardId", shardId, "oldgid", oldgid, "newgid", newgid)
+				sck.dlogln("[ChangeConfigTo] InstallShard error: ", err, "shardId", shardId, "oldgid", oldgid, "newgid", newgid)
 				return
 			}
+			sck.dlogln("deleteShard")
 			err = deleteShard(oldclk, shardId, new.Num)
+			sck.dlogln("deleteShard over")
 			if err != rpc.OK {
-				log.Println("[ChangeConfigTo] DeleteShard error: ", err, "shardId", shardId, "oldgid", oldgid, "newgid", newgid)
+				sck.dlogln("[ChangeConfigTo] DeleteShard error: ", err, "shardId", shardId, "oldgid", oldgid, "newgid", newgid)
 				return
 			}
 		}
@@ -154,7 +166,7 @@ func (sck *ShardCtrler) changeConfigTo(new *shardcfg.ShardConfig, isrecover bool
 	// save new config
 	err := sck.putConfig(new, oldVersion)
 	if err != rpc.OK {
-		log.Println("[ChangeConfigTo] putConfig error:", err)
+		sck.dlogln("[ChangeConfigTo] putConfig error:", err)
 		return
 	}
 	//log.Printf("[ChangeConfigTo] new config applied. %#v", new)
@@ -169,7 +181,7 @@ func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
 func (sck *ShardCtrler) getConfig() (*shardcfg.ShardConfig, rpc.Tversion) {
 	configdata, version, err := sck.IKVClerk.Get(CONFIG_KEY)
 	if err != rpc.OK && err != rpc.ErrNoKey {
-		log.Println("ShardCtrler getConfig RPC error:", err)
+		sck.dlogln("ShardCtrler getConfig RPC error: %v", err)
 		return nil, rpc.Tversion(0)
 	}
 	config := shardcfg.FromString(configdata)
@@ -180,7 +192,7 @@ func (sck *ShardCtrler) putConfig(cfg *shardcfg.ShardConfig, oldVersion rpc.Tver
 	cfgdata := cfg.String()
 	err := sck.IKVClerk.Put(CONFIG_KEY, cfgdata, oldVersion)
 	if err != rpc.OK {
-		log.Println("ShardCtrler putConfig RPC error:", err)
+		sck.dlogln("ShardCtrler putConfig RPC error: %v", err)
 		return err
 	}
 	return rpc.OK
@@ -190,7 +202,7 @@ func (sck *ShardCtrler) putConfig(cfg *shardcfg.ShardConfig, oldVersion rpc.Tver
 func (sck *ShardCtrler) getMigratingNewConfig() (*shardcfg.ShardConfig, rpc.Tversion) {
 	configdata, version, err := sck.IKVClerk.Get(CONFIG_MIGRATING_NEW_KEY)
 	for err != rpc.OK && err != rpc.ErrNoKey {
-		log.Println("ShardCtrler getMigratingNewConfig RPC error:", err)
+		sck.dlogln("ShardCtrler getMigratingNewConfig RPC error:", err)
 		configdata, version, err = sck.IKVClerk.Get(CONFIG_MIGRATING_NEW_KEY)
 	}
 	if configdata == "" {
@@ -207,7 +219,7 @@ func (sck *ShardCtrler) putMigratingNewConfig(cfg *shardcfg.ShardConfig, oldVers
 	cfgdata := cfg.String()
 	err := sck.IKVClerk.Put(CONFIG_MIGRATING_NEW_KEY, cfgdata, oldVersion)
 	if err != rpc.OK {
-		log.Println("ShardCtrler putMigratingNewConfig RPC error:", err)
+		sck.dlogln("ShardCtrler putMigratingNewConfig RPC error:", err)
 		return err
 	}
 	return rpc.OK
@@ -219,7 +231,7 @@ func (sck *ShardCtrler) putMigratingNewConfig(cfg *shardcfg.ShardConfig, oldVers
 func (sck *ShardCtrler) deleteMigratingNewConfig(oldVersion rpc.Tversion) rpc.Err {
 	err := sck.IKVClerk.Put(CONFIG_MIGRATING_NEW_KEY, "", oldVersion)
 	if err != rpc.OK {
-		log.Println("ShardCtrler putMigratingNewConfig RPC error:", err)
+		sck.dlogln("ShardCtrler putMigratingNewConfig RPC error:", err)
 		return err
 	}
 	return rpc.OK
@@ -227,6 +239,13 @@ func (sck *ShardCtrler) deleteMigratingNewConfig(oldVersion rpc.Tversion) rpc.Er
 
 // freezeShard
 // retry while ErrgGroupMaybeLeave
+//
+// note: we cannot distinguish between
+//
+// requests/responses lost due to unreliable networks
+// &
+// the target shardgroup servers being offline/shutdown.
+// So if the target shardgroup servers is offline and can never respond, this function will never return.
 func freezeShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
 	shard, err := sgck.FreezeShard(s, num)
 	for err == rpc.ErrgGroupMaybeLeave {
@@ -237,6 +256,13 @@ func freezeShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, num shardcfg.Tnum) ([]b
 
 // installShard
 // retry while ErrgGroupMaybeLeave
+//
+// note: we cannot distinguish between
+//
+// requests/responses lost due to unreliable networks
+// &
+// the target shardgroup servers being offline/shutdown.
+// So if the target shardgroup servers is offline and can never respond, this function will never return.
 func installShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, state []byte, num shardcfg.Tnum) rpc.Err {
 	err := sgck.InstallShard(s, state, num)
 	for err == rpc.ErrgGroupMaybeLeave {
@@ -247,10 +273,33 @@ func installShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, state []byte, num shar
 
 // deleteShard
 // retry while ErrgGroupMaybeLeave
+//
+// note: we cannot distinguish between
+//
+// requests/responses lost due to unreliable networks
+// &
+// the target shardgroup servers being offline/shutdown.
+// So if the target shardgroup servers is offline and can never respond, this function will never return.
 func deleteShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 	err := sgck.DeleteShard(s, num)
 	for err == rpc.ErrgGroupMaybeLeave {
 		err = sgck.DeleteShard(s, num)
 	}
 	return err
+}
+func (sck *ShardCtrler) dlog(format string, a ...interface{}) {
+	args := []any{
+		sck.me,
+	}
+	args = append(args, a...)
+	DPrintf("[Shradctrler %d] " + format, args...)
+}
+
+
+func (sck *ShardCtrler) dlogln(a ...interface{}) {
+	args := []any{
+		fmt.Sprintf("[Shradctrler %d]", sck.me),
+	}
+	args = append(args, a...)
+	DPrintln(args...)
 }

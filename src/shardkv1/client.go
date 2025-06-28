@@ -41,9 +41,9 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	sgck := ck.makeShardGroupClerk(shardId)
 	val, ver, err := sgck.Get(key)
 	for err == rpc.ErrWrongGroup || err == rpc.ErrgGroupMaybeLeave {
+		log.Println("Get retry for err:", err)
 		sgck = ck.makeShardGroupClerk(shardId)
 		val, ver, err = sgck.Get(key)
-		log.Println("Get retry")
 	}
 	return val, ver, err
 }
@@ -54,9 +54,9 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	sgck := ck.makeShardGroupClerk(shardId)
 	err := sgck.Put(key, value, version)
 	for err == rpc.ErrWrongGroup || err == rpc.ErrgGroupMaybeLeave {
+		log.Println("Put retry for err:", err)
 		sgck = ck.makeShardGroupClerk(shardId)
 		err = sgck.Put(key, value, version)
-		log.Println("Put retry")
 		// see explain in sgck.Put()
 		if err == rpc.ErrVersion {
 			err = rpc.ErrMaybe
@@ -73,6 +73,7 @@ func key2shardId(key string) shardcfg.Tshid {
 func (ck *Clerk) makeShardGroupClerk(shardId  shardcfg.Tshid) *shardgrp.Clerk {
 	config := ck.sck.Query()
 	gid, srvs, ok := config.GidServers(shardId)
+	log.Println("makeShardGroupClerk: shardId ", shardId, " on gid", gid)
 	if !ok {
 		log.Println("GidServers failed. invalid gid?", gid)
 		panic("GidServers failed. invalid gid?")
