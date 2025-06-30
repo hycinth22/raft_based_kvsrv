@@ -7,6 +7,7 @@ package shardctrler
 import (
 	"6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
+	"6.5840/kvsrv1/lock"
 	"6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp"
@@ -18,10 +19,10 @@ import (
 )
 
 const (
-	CONFIG_KEY = "ShardCtrlerConfig"
+	CONFIG_KEY               = "ShardCtrlerConfig"
 	CONFIG_MIGRATING_NEW_KEY = "ShardCtrlerMigratingNewConfig"
 
-	LEASE_KEY = "ShardCtrlerLease"
+	LEASE_KEY     = "ShardCtrlerLease"
 	LEASE_TIMEOUT = 100 * time.Millisecond
 
 	MAX_RETRY_TIMES = 100
@@ -32,6 +33,8 @@ type ShardCtrler struct {
 	clnt *tester.Clnt
 	kvtest.IKVClerk
 	me int64
+
+	leaseLock *lock.Lock
 }
 
 var sckCnt atomic.Int64
@@ -42,6 +45,7 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 	srv := tester.ServerName(tester.GRP0, 0)
 	sck.IKVClerk = kvsrv.MakeClerk(clnt, srv)
 	sck.me = sckCnt.Add(1)
+	sck.leaseLock = lock.MakeLock(sck.IKVClerk, LEASE_KEY)
 	// log.Println("[ShardCtrler] start up")
 	return sck
 }
@@ -56,6 +60,8 @@ func (sck *ShardCtrler) waitConcurrentCtrler() {
 
 // Calls InitController() before starting a new controller.
 func (sck *ShardCtrler) InitController() {
+	sck.leaseLock.Acquire()
+	defer sck.leaseLock.Release()
 	sck.checkAndCompleteMirgratingNewConfig()
 }
 
@@ -73,7 +79,8 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // changes the configuration it may be superseded by another
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
-	donelease, failtokeep := sck.grabLease()
+	sck.leaseLock.Acquire()
+	defer sck.leaseLock.Release()
 
 	var mcfgver rpc.Tversion
 	var err error
@@ -81,10 +88,6 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		mcfgver, err = sck.checkAndCompleteMirgratingNewConfig()
 		if err != nil {
 			panic(err)
-		}
-
-		if !failtokeep.Load() {
-			sck.grabLease()
 		}
 
 		sck.dlogln("start ChangeConfigTo")
@@ -99,15 +102,7 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		break
 	}
 
-	if !failtokeep.Load() {
-		sck.grabLease()
-	}
-
 	sck.changeConfigTo(new, false)
-
-	if !failtokeep.Load() {
-		sck.grabLease()
-	}
 
 	rerr := sck.deleteMigratingNewConfig(mcfgver)
 	if rerr != rpc.OK {
@@ -119,7 +114,6 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		}
 	}
 	sck.dlogln("complete ChangeConfigTo")
-	donelease <- struct{}{}
 }
 
 func (sck *ShardCtrler) checkAndCompleteMirgratingNewConfig() (rpc.Tversion, error) {
@@ -251,96 +245,6 @@ func (sck *ShardCtrler) putMigratingNewConfig(cfg *shardcfg.ShardConfig, oldVers
 		return err
 	}
 	return rpc.OK
-}
-
-func (sck *ShardCtrler) setLease(oldVersion rpc.Tversion) rpc.Err {
-	err := sck.IKVClerk.Put(LEASE_KEY, "true", oldVersion)
-	// if err != rpc.OK && err != rpc.ErrNoKey {
-	// 	sck.dlogln("ShardCtrler getConfig RPC error: %v", err)
-	// 	panic(err)
-	// }
-	return err
-}
-
-
-func (sck *ShardCtrler) waitLease() rpc.Tversion {
-	checkLease := func() (bool, rpc.Tversion) {
-		content, version, err := sck.IKVClerk.Get(LEASE_KEY)
-		if err != rpc.OK && err != rpc.ErrNoKey {
-			sck.dlogln("ShardCtrler getConfig RPC error: %v", err)
-			panic(err)
-		}
-		if err == rpc.ErrNoKey {
-			return false, rpc.Tversion(0)
-		}
-		return content!="", version
-	}
-
-	exist, ver := checkLease()
-	for exist {
-		time.Sleep(2 * LEASE_TIMEOUT)
-		exist2, ver2 := checkLease()
-		if exist2 {
-			if ver == ver2 {
-				// expired
-				return ver2
-			} else {
-				// continue to wait
-				ver = ver2
-			}
-		} else {
-			// ok...
-			return ver2
-		}
-	}
-	return ver
-}
-
-func (sck *ShardCtrler) contendLease(ver rpc.Tversion) bool {
-	err := sck.setLease(ver)
-	if err == rpc.ErrVersion || err == rpc.ErrMaybe {
-		return false
-	}
-	sck.dlog("contendLease succ num:%v", ver+1)
-	return true
-}
-
-func (sck *ShardCtrler) keepLease(ver rpc.Tversion) (chan<- struct{}, *atomic.Bool) {
-	done := make(chan struct{}, 1)
-	failtokeep := &atomic.Bool{}
-	go func() {
-		for {
-			select {
-			case <-done:
-				sck.dlog("doneLease...")
-				sck.IKVClerk.Put(LEASE_KEY, "", ver)
-				return
-			default:
-				sck.dlog("keepLease...")
-				err := sck.setLease(ver)
-				if err == rpc.ErrVersion || err == rpc.ErrMaybe {
-					sck.dlog("failtokeep!")
-					failtokeep.Store(true)
-					return
-				}
-				ver++
-				time.Sleep(LEASE_TIMEOUT)
-			}
-		}
-	}()
-	return done, failtokeep
-}
-
-func (sck *ShardCtrler) grabLease() (chan<- struct{}, *atomic.Bool) {
-	ownLease := false
-	var ver rpc.Tversion
-	for !ownLease {
-		sck.dlog("waitLease...")
-		ver = sck.waitLease()
-		sck.dlog("contendLease!")
-		ownLease = sck.contendLease(ver)
-	}
-	return sck.keepLease(ver)
 }
 
 // return rpc.OK if ok

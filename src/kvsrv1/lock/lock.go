@@ -7,6 +7,9 @@ import (
 )
 
 const RETRY_DURATION = 100 * time.Millisecond
+const UNLOCK_TIMEOUT = 5 * time.Second
+const ErrLockReleased rpc.Err = "LockReleased"
+
 
 type Lock struct {
 	// IKVClerk is a go interface for k/v clerks: the interface hides
@@ -58,7 +61,11 @@ func (lk *Lock) Acquire() {
 			// maybe duplicated acquire or previous ErrMaybe put
 			return
 		}
+		timeStartWaiting := time.Now()
 		for holding_client != "" {
+			if time.Since(timeStartWaiting) > UNLOCK_TIMEOUT {
+				break
+			}
 			time.Sleep(RETRY_DURATION)
 			// waiting for releasing
 			holding_client, lockVer, err = lk.ck.Get(lk.lockKey)
@@ -103,4 +110,17 @@ func (lk *Lock) Release() {
 		// ErrVersion is impossible, because we have observed holding_client == lk.clientID then only this client will override it
 		panic(err)
 	}
+}
+
+
+func (lk *Lock) ExtendExpiration() rpc.Err {
+	holding_client, lockVer, err := lk.ck.Get(lk.lockKey)
+	if err != rpc.OK {
+		return err
+	}
+	if holding_client == lk.clientID {
+		return ErrLockReleased
+	}
+	err = lk.ck.Put(lk.lockKey, "", lockVer)
+	return err
 }
