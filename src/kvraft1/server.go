@@ -206,11 +206,11 @@ func (kv *KVServer) dlog(format string, a ...interface{}) {
 		if DLOG_DATA {
 			kv.mu.Lock()
 			defer kv.mu.Unlock()
-			fmt.Fprintln(b, "{")
+			fmt.Fprintln(&b, "{")
 			for key := range kv.data {
 				fmt.Fprintf(&b, "[%v] %#v", key, kv.data[key])
 			}
-			fmt.Fprintln(b, "}")
+			fmt.Fprintln(&b, "}")
 		}
 		return b.String()
 	}
