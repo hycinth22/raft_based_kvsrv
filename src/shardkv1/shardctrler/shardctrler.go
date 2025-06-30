@@ -13,8 +13,8 @@ import (
 	"6.5840/tester1"
 
 	"fmt"
-	"time"
 	"sync/atomic"
+	"time"
 )
 
 const (
@@ -23,9 +23,9 @@ const (
 
 	LEASE_KEY = "ShardCtrlerLease"
 	LEASE_TIMEOUT = 100 * time.Millisecond
+
+	MAX_RETRY_TIMES = 100
 )
-
-
 
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
@@ -149,7 +149,7 @@ func (sck *ShardCtrler) changeConfigTo(new *shardcfg.ShardConfig, isrecover bool
 	// migrate
 	old, oldVersion := sck.getConfig()
 	//log.Printf("[ChangeConfigTo] old %#v new %#v", old, new)
-	for shardId := shardcfg.Tshid(0); shardId<shardcfg.NShards; shardId++ {
+	for shardId := shardcfg.Tshid(0); shardId < shardcfg.NShards; shardId++ {
 		oldgid, oldsrvs, ok := old.GidServers(shardId)
 		if !ok {
 			sck.dlogln("[ChangeConfigTo] get old.GidServers failed.", "shardId", shardId)
@@ -366,8 +366,10 @@ func (sck *ShardCtrler) deleteMigratingNewConfig(oldVersion rpc.Tversion) rpc.Er
 // So if the target shardgroup servers is offline and can never respond, this function will never return.
 func freezeShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
 	shard, err := sgck.FreezeShard(s, num)
-	for err == rpc.ErrgGroupMaybeLeave {
+	retry := 0
+	for err == rpc.ErrgGroupMaybeLeave && retry < MAX_RETRY_TIMES {
 		shard, err = sgck.FreezeShard(s, num)
+		retry++
 	}
 	return shard, err
 }
@@ -383,8 +385,10 @@ func freezeShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, num shardcfg.Tnum) ([]b
 // So if the target shardgroup servers is offline and can never respond, this function will never return.
 func installShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, state []byte, num shardcfg.Tnum) rpc.Err {
 	err := sgck.InstallShard(s, state, num)
-	for err == rpc.ErrgGroupMaybeLeave {
+	retry := 0
+	for err == rpc.ErrgGroupMaybeLeave && retry < MAX_RETRY_TIMES {
 		err = sgck.InstallShard(s, state, num)
+		retry++
 	}
 	return err
 }
@@ -400,8 +404,10 @@ func installShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, state []byte, num shar
 // So if the target shardgroup servers is offline and can never respond, this function will never return.
 func deleteShard(sgck *shardgrp.Clerk, s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 	err := sgck.DeleteShard(s, num)
-	for err == rpc.ErrgGroupMaybeLeave {
+	retry := 0
+	for err == rpc.ErrgGroupMaybeLeave && retry < MAX_RETRY_TIMES {
 		err = sgck.DeleteShard(s, num)
+		retry++
 	}
 	return err
 }
