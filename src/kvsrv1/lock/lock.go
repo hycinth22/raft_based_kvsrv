@@ -9,7 +9,6 @@ import (
 )
 
 const RETRY_DURATION = 100 * time.Millisecond
-const LOCK_EXPIRE_TIMEOUT = 1000 * time.Millisecond
 const ErrLockReleased rpc.Err = "LockReleased"
 
 type Lock struct {
@@ -21,6 +20,8 @@ type Lock struct {
 
 	lockKey  string
 	clientID string
+
+	timeout  time.Duration
 }
 
 // calls MakeLock() and passes in a k/v clerk
@@ -31,6 +32,13 @@ func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 	lk := &Lock{ck: ck}
 	lk.lockKey = l
 	lk.clientID = kvtest.RandValue(8)
+	lk.timeout = time.Until(time.Now().AddDate(100, 0, 0))
+	return lk
+}
+
+func MakeExpiredLock(ck kvtest.IKVClerk, l string, timeout time.Duration) *Lock {
+	lk := MakeLock(ck, l)
+	lk.timeout = timeout
 	return lk
 }
 
@@ -218,7 +226,7 @@ func (lk *Lock) genLockVal() string {
 	enc := json.NewEncoder(&buffer)
 	if err := enc.Encode(lockValue{
 		HoldingClientID: lk.clientID,
-		ExpiredAt:       time.Now().Add(LOCK_EXPIRE_TIMEOUT),
+		ExpiredAt:       time.Now().Add(lk.timeout),
 	}); err != nil {
 		panic(err)
 	}
