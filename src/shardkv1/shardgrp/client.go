@@ -22,10 +22,10 @@ func MakeClerk(clnt *tester.Clnt, servers []string) *Clerk {
 	return ck
 }
 
-func (ck *Clerk) requestLeader(requestOp func(tryServerIdx int, retry bool) (successReq bool, data any) ) (reply any) {
+func (ck *Clerk) requestLeader(requestOp func(tryServerIdx int) (successReq bool, data any) ) (reply any) {
 	var ok bool
 	leader := ck.lastSeenLeader
-	if ok, reply = requestOp(leader, false); ok {
+	if ok, reply = requestOp(leader); ok {
 		return reply
 	}
 	ck.dlog("[requestLeader] request sending to %v failed. retry to find the leader", leader)
@@ -38,7 +38,7 @@ func (ck *Clerk) requestLeader(requestOp func(tryServerIdx int, retry bool) (suc
 
 		// resend
 		ck.dlog("[requestLeader] resend to %v", leader)
-		ok, reply = requestOp(leader, true)
+		ok, reply = requestOp(leader)
 	}
 	ck.lastSeenLeader = leader
 	ck.dlog("[requestLeader] the leader is %v now", leader)
@@ -54,7 +54,7 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	args := rpc.GetArgs {
 		Key: key,
 	}
-	xreply := ck.requestLeader(func(tryServerIdx int, _retry bool) (bool, any) {
+	xreply := ck.requestLeader(func(tryServerIdx int) (bool, any) {
 		reply := rpc.GetReply{}
 		ck.dlog("[Get] (args %#v)send to server %v", args, tryServerIdx)
 		ok := ck.clnt.Call(ck.servers[tryServerIdx], "KVServer.Get", &args, &reply)
@@ -99,19 +99,21 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 		Value: value,
 		Version: version,
 	}
-	xreply := ck.requestLeader(func(tryServerIdx int, retry bool) (bool, any) {
+	failSeen := false
+	xreply := ck.requestLeader(func(tryServerIdx int) (bool, any) {
 		reply := rpc.PutReply{}
 		ck.dlog("[Put] (args %#v) will send to server %v", args, tryServerIdx)
 		ok := ck.clnt.Call(ck.servers[tryServerIdx], "KVServer.Put", &args, &reply)
 		if !ok {
 			ck.dlog("[Put] failed. (args %#v) server %v, try next server", args, tryServerIdx)
+			failSeen = true
 			return false, reply
 		}
 		if reply.Err != rpc.ErrWrongGroup && reply.Err != rpc.OK && reply.Err != rpc.ErrNoKey && reply.Err != rpc.ErrVersion {
 			ck.dlog("[Put] ok but err undesired. (args %#v) server %v reply %v", args, tryServerIdx, reply)
 			return false, reply
 		}
-		if retry {
+		if failSeen {
 			// however, there is a tricky case
 			// if 1st request arrives in server, executes successfully, and response is lost
 			// then we resend put and we will got ErrVersion (actually it's successfully!)
@@ -136,19 +138,21 @@ func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.E
 		Shard: s,
 		Num: num,
 	}
-	xreply := ck.requestLeader(func(tryServerIdx int, retry bool) (bool, any) {
+	failSeen := false
+	xreply := ck.requestLeader(func(tryServerIdx int) (bool, any) {
 		reply := shardrpc.FreezeShardReply{}
 		ck.dlog("[FreezeShard] (args %#v) will send to server %v", args, tryServerIdx)
 		ok := ck.clnt.Call(ck.servers[tryServerIdx], "KVServer.FreezeShard", &args, &reply)
 		if !ok {
 			ck.dlog("[FreezeShard] failed. (args %#v) server %v, try next server", args, tryServerIdx)
+			failSeen = true
 			return false, reply
 		}
 		if reply.Err != rpc.OK && reply.Err != rpc.ErrVersion && reply.Err != rpc.ErrNoShard {
 			ck.dlog("[FreezeShard] ok but err undesired. (args %#v) server %v reply %v", args, tryServerIdx, reply)
 			return false, reply
 		}
-		if retry {
+		if failSeen {
 			// however, there is a tricky case
 			// if 1st request arrives in server, executes successfully, and response is lost
 			// then we resend put and we will got ErrVersion (actually it's successfully!)
@@ -174,19 +178,21 @@ func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum)
 		State: state,
 		Num:   num,
 	}
-	xreply := ck.requestLeader(func(tryServerIdx int, retry bool) (bool, any) {
+	failSeen := false
+	xreply := ck.requestLeader(func(tryServerIdx int) (bool, any) {
 		reply := shardrpc.InstallShardReply{}
 		ck.dlog("[InstallShard] (args %#v) will send to server %v", args, tryServerIdx)
 		ok := ck.clnt.Call(ck.servers[tryServerIdx], "KVServer.InstallShard", &args, &reply)
 		if !ok {
 			ck.dlog("[InstallShard] failed. (args %#v) server %v, try next server", args, tryServerIdx)
+			failSeen = true
 			return false, reply
 		}
 		if reply.Err != rpc.OK && reply.Err != rpc.ErrVersion && reply.Err != rpc.ErrExistShard && reply.Err != rpc.ErrInvalidShardState {
 			ck.dlog("[InstallShard] ok but err undesired. (args %#v) server %v reply %v", args, tryServerIdx, reply)
 			return false, reply
 		}
-		if retry {
+		if failSeen {
 			// however, there is a tricky case
 			// if 1st request arrives in server, executes successfully, and response is lost
 			// then we resend put and we will got ErrExistShard (actually it's successfully!)
@@ -211,19 +217,21 @@ func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 		Shard: s,
 		Num: num,
 	}
-	xreply := ck.requestLeader(func(tryServerIdx int, retry bool) (bool, any) {
+	failSeen := false
+	xreply := ck.requestLeader(func(tryServerIdx int) (bool, any) {
 		reply := shardrpc.DeleteShardReply{}
 		ck.dlog("[DeleteShard] (args %#v) will send to server %v", args, tryServerIdx)
 		ok := ck.clnt.Call(ck.servers[tryServerIdx], "KVServer.DeleteShard", &args, &reply)
 		if !ok {
 			ck.dlog("[DeleteShard] failed. (args %#v) server %v, try next server", args, tryServerIdx)
+			failSeen = true
 			return false, reply
 		}
 		if reply.Err != rpc.OK && reply.Err != rpc.ErrVersion && reply.Err != rpc.ErrNoShard {
 			ck.dlog("[DeleteShard] ok but err undesired. (args %#v) server %v reply %v", args, tryServerIdx, reply)
 			return false, reply
 		}
-		if retry {
+		if failSeen {
 			// however, there is a tricky case
 			// if 1st request arrives in server, executes successfully, and response is lost
 			// then we resend put and we will got ErrNoShard (actually it's successfully!)
